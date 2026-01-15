@@ -13,6 +13,7 @@ const FileUploader = () => {
   const [progress, setProgress] = useState(null)
   const [loading, setLoading] = useState(false)
   const [triedSelecting, setTriedSelecting] = useState(false)
+  const fileInputRef = useRef(null);
 
   // Handle file selection
   const validImageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'];
@@ -22,9 +23,7 @@ const FileUploader = () => {
   useEffect(() => {
     // Initialize Resumable.js
     resumableRef.current = new Resumable({
-
       target: 'http://localhost:5000/fullFileUpload',
-      // target: 'http://localhost:5000/largefile', 
       chunkSize: 3 * 1024 * 1024, // 1 MB per chunk
       simultaneousUploads: 1,
       testChunks: false, // Disable testing chunks before upload
@@ -51,7 +50,6 @@ const FileUploader = () => {
 
     resumableRef.current.on('progress', () => {
       setProgress((resumableRef.current.progress() * 100).toFixed(2));
-      console.log(`Progress: ${(resumableRef.current.progress() * 100).toFixed(2)}%`);
     });
   }, []);
 
@@ -101,10 +99,8 @@ const FileUploader = () => {
         const blob = await response.blob();
 
         const disposition = response.headers.get('Content-Disposition');
-        console.log(response.headers)
         let downloadfilename = '_result.csv';
         if (disposition) {
-          console.log(disposition);
           downloadfilename = disposition
             .split('filename=')[1]
             .replace(/"/g, '');
@@ -130,9 +126,11 @@ const FileUploader = () => {
         reader.readAsText(blob);
 
       } else {
+        setLoading(false);
         throw new Error('Failed to fetch file');
       }
     } catch (error) {
+      setLoading(false);
       console.error('Error downloading the file:', error);
       alert('Failed to download the file');
     }
@@ -158,96 +156,145 @@ const FileUploader = () => {
     });
   };
 
+  const handleZoneClick = () => {
+    fileInputRef.current.click();
+  }
+
   return (
+    <div className="uploader-container">
+    
+      {/* Upload Area - Hide if results are showing, typically */}
+      {chartData.length === 0 && (
+        <>
+            <div 
+                className={`drop-zone ${filesSelected ? 'active' : ''}`}
+                onClick={handleZoneClick}
+            >
+                 <svg className="icon-upload" viewBox="0 0 24 24">
+                    <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
+                </svg>
+                <h3>
+                    {filesSelected ? "Files Selected" : "Click to Upload Image"}
+                </h3>
+                <p>Supported: PNG, JPG, JPEG, GIF, BMP, WEBP</p>
+                <input 
+                    type="file" 
+                    onChange={handleFileSelect} 
+                    multiple 
+                    className="file-input"
+                    ref={fileInputRef}
+                />
+            </div>
 
-    <div className="ImageSubmission">
+            {/* Preview Section */}
+            {image && (
+                <div className="preview-container">
+                    <p className="mb-1 font-bold">Preview:</p>
+                    <img
+                        alt="Selected"
+                        src={URL.createObjectURL(image)}
+                        className="preview-image"
+                    />
+                </div>
+            )}
 
-    {/*  requires some redundancy removal, can do this in one go */}
-    {image && (
-        <div className="ImageSelection">
-          <img
-            alt="Selected"
-            src={URL.createObjectURL(image)}
-            style={{
-              display: 'block',
-              margin: '0 auto',
-              width: '500px',
-              height: 'auto',
-            }}
-          />
-        </div>
-      )}
-
-      {!image && triedSelecting &&(
-        <div className="ImageSelection">
-          <img
-            alt="Selected"
-            src={"/Images/combined.png" }
-            style={{
-              display: 'block',
-              margin: '0 auto',
-              width: '1080px',
-              height: 'auto',
-            }}
-          />
-        </div>
-      )}
-
-      {fileUploaded && (
-        <div className="csv-container">
-          <div className="csvDownload">
-            Download Result File for: {fileName}
-            <button onClick={() => downloadFile(fileName)}>Download & Process</button>
-            {loading && <div> Processing Input... </div>}
-          </div>
-        </div>
-      )}
-
-
-      <div className="bar-graph-container">
-
-        {chartData.map((row, index) => (
-          <div key={index} className="bar-graph">
-            <h2>{row.image_name}</h2> 
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart data={[
-                { name: "None", value: row.None },
-                { name: "Perisinusoidal", value: row.Perisinusoidal },
-                { name: "Bridging", value: row.Bridging },
-                { name: "Cirrosis", value: row.Cirrosis }
-              ]}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="name" label={{ value: "Categories", position: "bottom" }} />
-                  <YAxis 
-                    domain={[0, 1]} // Set the Y-axis to range from 0 to 1
-                    label={{ value: "Confidence %", angle: -90, position: "insideLeft" }} 
-                    tickFormatter={(tick) => `${(tick * 100).toFixed(0)}%`} 
+            {!image && triedSelecting && (
+               <div className="preview-container">
+                  <p className="text-muted">Invalid image format or multiple files.</p>
+                  <img
+                    alt="Info"
+                    src="/Images/combined.png"
+                    className="preview-image"
+                    style={{maxWidth: '100%', height:'auto'}}
                   />
-                  <Tooltip formatter={(value) => `${(value * 100).toFixed(0)}%`} />
-                <Bar dataKey="value" fill="#7A003C" />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        ))}
-      </div>
+               </div>
+            )}
 
+             {/* Action Buttons */}
+            {filesSelected && (
+                <div className="mt-2">
+                     <button 
+                        onClick={handleSubmit} 
+                        className="btn btn-primary"
+                        disabled={loading || (progress > 0 && progress < 100)}
+                     >
+                        {loading ? 'Processing...' : 'Upload & Analyze Files'}
+                     </button>
+                </div>
+            )}
 
-      <div className="form-container">
-        <form onSubmit={handleSubmit}>
-          <input type="file" onChange={handleFileSelect} multiple />
-          <button type="submit" disabled={!filesSelected}>
-            Upload Files
-          </button>
-        </form>
-      </div>
-      {progress &&
-        <div className='progress-bar-container'>
-          <ProgressBar progress={progress}> </ProgressBar>
+            {/* Progress Bar */}
+            {progress && parseInt(progress) < 100 && (
+                 <div className="mt-2">
+                     <p>Uploading: {parseInt(progress)}%</p>
+                     <ProgressBar progress={progress} />
+                 </div>
+            )}
+        </>
+      )}
+
+      {/* Post-Upload / Processing Section */}
+      {fileUploaded && chartData.length === 0 && (
+        <div className="card mt-2">
+           <h3>File Uploaded Successfully!</h3>
+           <p className="text-muted mb-2">Filename: {fileName}</p>
+           
+           <button 
+                className="btn btn-primary" 
+                onClick={() => downloadFile(fileName)}
+                disabled={loading}
+            >
+               {loading ? 'Processing Analysis...' : 'Process Analysis & View Results'}
+           </button>
         </div>
-      }
+      )}
+      
+      {loading && chartData.length === 0 && !filesSelected && (
+         <div className="mt-2">
+             <p>Analyzing on server...</p>
+         </div>
+      )}
+
+
+      {/* Charts / Results Section */}
+      {chartData.length > 0 && (
+          <div className="charts-grid">
+            {chartData.map((row, index) => (
+            <div key={index} className="chart-card">
+                <h3>{row.image_name}</h3> 
+                <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={[
+                    { name: "None", value: row.None },
+                    { name: "Perisinu", value: row.Perisinusoidal },
+                    { name: "Bridging", value: row.Bridging },
+                    { name: "Cirrosis", value: row.Cirrosis }
+                ]}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="name" tick={{fontSize: 12}} />
+                    <YAxis 
+                        domain={[0, 1]} 
+                        tickFormatter={(tick) => `${(tick * 100).toFixed(0)}%`} 
+                        tick={{fontSize: 12}}
+                    />
+                    <Tooltip formatter={(value) => `${(value * 100).toFixed(1)}%`} cursor={{fill: '#f0f0f0'}} />
+                    <Bar dataKey="value" fill="#7A003C" radius={[4, 4, 0, 0]} />
+                </BarChart>
+                </ResponsiveContainer>
+            </div>
+            ))}
+            
+            <div className="col-span-full text-center mt-2">
+                <button 
+                    className="btn btn-primary" 
+                    onClick={() => window.location.reload()}
+                >
+                    Analyze Another Image
+                </button>
+            </div>
+          </div>
+      )}
+
     </div>
-
-
   );
 }
 
