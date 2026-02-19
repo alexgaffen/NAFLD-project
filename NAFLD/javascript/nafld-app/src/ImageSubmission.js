@@ -304,8 +304,12 @@ const ImageSubmission = () => {
 
                 <div className="report-card info-card">
                     <p>
-                        <strong>Visualization:</strong> White pixels indicate detected collagen fibers
-                        (fibrosis) via Fuzzy C-Means clustering on the VGG16 feature space.
+                        <strong>Visualization & Extent:</strong> White pixels indicate detected collagen fibers 
+                        isolated via RGB color deconvolution and thresholding (Mathematical Filter).
+                    </p>
+                    <p style={{ marginTop: '0.4rem' }}>
+                        <strong>Staging:</strong> Disease category (A-D) is classified by analyzing the 
+                        architectural patterns of these fibers using a VGG16 neural network and Fuzzy C-Means clustering (AI).
                     </p>
                     {analysisResult?.patch_count && (
                         <p style={{ marginTop: '0.4rem', fontSize: '0.72rem', opacity: 0.7 }}>

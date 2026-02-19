@@ -124,7 +124,7 @@ def fibrosis_filter(window, stain_matrix=None):
     red_stain = stains[:, :, 0]
 
     hsv_img = cv2.cvtColor(img_array, cv2.COLOR_RGB2HSV)
-    mask = (red_stain > 2.5) & (img_array.sum(axis=-1) > 50)
+    mask = (red_stain > 2.4) & (img_array.sum(axis=-1) > 50)
     mask = mask.astype(np.uint8) * 255
     total_selected_pixels = np.sum(mask == 255)
     total_pixels = mask.size
@@ -137,16 +137,30 @@ def fibrosis_filter(window, stain_matrix=None):
 
     return result_image_pil, total_selected_pixels, selected_ratio
 
-def predict_cluster_pil(pil_image, already_filtered=False):
+def predict_cluster_pil(pil_image, already_filtered=False, original_pil=None):
+    """
+    Classify an image using VGG16 + PCA + Fuzzy C-Means.
+
+    VGG16 needs the original RGB tissue image for meaningful features.
+    The B&W mask from fibrosis_filter is only used for the fibrosis percentage.
+
+    Parameters
+    ----------
+    pil_image   : PIL image (filtered mask if already_filtered=True, else raw RGB)
+    already_filtered : if True, skip fibrosis_filter (percentage will be None)
+    original_pil : the original RGB image for VGG16 feature extraction.
+                   If None, falls back to pil_image (legacy behaviour).
+    """
     image = np.array(pil_image)
 
     if already_filtered:
-        img = pil_image
         percentage = None
     else:
-        img, _, percentage = fibrosis_filter(image)
+        _, _, percentage = fibrosis_filter(image)
 
-    features = extract_features(img)
+    # VGG16 must see the original RGB tissue, NOT the B&W mask
+    feature_source = original_pil if original_pil is not None else pil_image
+    features = extract_features(feature_source)
     reduc_features = pca_model.transform([features])
     u, _, _, _, _, _ = cmeans_predict(reduc_features.T, centroids, m=best_m, error=0.1, maxiter=100)
     cluster_label = np.argmax(u, axis=0)
@@ -172,7 +186,7 @@ def update_filter_slide_legacy(change):
     region = region.convert("RGB")  # Convert to RGB
 
     result_image_pil, total_selected_pixels, selected_ratio = fibrosis_filter(region)
-    u, cluster_label, _ = predict_cluster_pil(result_image_pil, already_filtered=True)
+    u, cluster_label, _ = predict_cluster_pil(result_image_pil, already_filtered=True, original_pil=region)
 
     with output:
         output.clear_output(wait=True)
@@ -206,7 +220,7 @@ def update_filter_slide(image_folder,file,level_slider,x_slider,y_slider,window_
     region = region.convert("RGB")  # Convert to RGB
 
     result_image_pil, total_selected_pixels, selected_ratio = fibrosis_filter(region)
-    u, cluster_label, _ = predict_cluster_pil(result_image_pil, already_filtered=True)
+    u, cluster_label, _ = predict_cluster_pil(result_image_pil, already_filtered=True, original_pil=region)
 
     output = widgets.Output()
 
@@ -240,8 +254,9 @@ def update_filter_image(change):
     original_image = cv2.imread(original_image_path)
     original_image = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
     output = widgets.Output()
+    original_pil = Image.fromarray(original_image)
     result_image_pil, total_selected_pixels, selected_ratio = fibrosis_filter(original_image)
-    u, cluster_label, _ = predict_cluster_pil(result_image_pil, already_filtered=True)
+    u, cluster_label, _ = predict_cluster_pil(result_image_pil, already_filtered=True, original_pil=original_pil)
     with output:
         output.clear_output(wait=True)
         plt.figure(figsize=(30, 20))
@@ -273,7 +288,9 @@ def predict_cluster(image_path, stain_matrix=None):
     image = cv2.imread(image_path)
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     img, pxl, percentage = fibrosis_filter(image, stain_matrix)
-    features = extract_features(img)
+    # Pass the original RGB image to VGG16, not the B&W mask
+    original_pil = Image.fromarray(image)
+    features = extract_features(original_pil)
     reduc_features = pca_model.transform([features])
     u, _, _, _, _, _ = cmeans_predict(reduc_features.T, centroids, m=best_m, error=0.1, maxiter=100)
     cluster_label = np.argmax(u, axis=0)
@@ -399,16 +416,31 @@ def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=40
             level_w, level_h = slide.level_dimensions[level]
             full_pil = slide.read_region((0, 0), level, (level_w, level_h)).convert("RGB")
             full_image = np.array(full_pil)
+            
+            # Create thumbnail for classification
             thumb_pil = slide.get_thumbnail((1024, 1024)).convert("RGB")
             slide.close()
             print(f"[Patch] SVS opened at level {level} → {level_w}×{level_h}")
         else:
-            img = Image.open(file_path).convert("RGB")
-            if max(img.size) > max_processing_dim:
-                img.thumbnail((max_processing_dim, max_processing_dim), Image.LANCZOS)
-            full_image = np.array(img)
-            thumb_pil = img.copy()
-            thumb_pil.thumbnail((1024, 1024), Image.LANCZOS)
+            try:
+                # Try OpenSlide first (works for TIFs with pyramids)
+                slide = OpenSlide(file_path)
+                level = _select_slide_level(slide, max_processing_dim)
+                level_w, level_h = slide.level_dimensions[level]
+                full_pil = slide.read_region((0, 0), level, (level_w, level_h)).convert("RGB")
+                full_image = np.array(full_pil)
+                thumb_pil = slide.get_thumbnail((1024, 1024)).convert("RGB")
+                slide.close()
+                print(f"[Patch] Large TIFF opened via OpenSlide at level {level}")
+            except Exception:
+                # Fallback to Pillow if OpenSlide fails (e.g. standard TIFF without pyramid)
+                print("[Patch] Fallback to Pillow for image load")
+                img = Image.open(file_path).convert("RGB")
+                if max(img.size) > max_processing_dim:
+                    img.thumbnail((max_processing_dim, max_processing_dim), Image.LANCZOS)
+                full_image = np.array(img)
+                thumb_pil = img.copy()
+                thumb_pil.thumbnail((1024, 1024), Image.LANCZOS)
 
         h, w = full_image.shape[:2]
         full_mask = np.zeros((h, w, 3), dtype=np.uint8)
@@ -455,7 +487,7 @@ def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=40
         # ── Classification on thumbnail (model-compatible) ──
         thumb_np = np.array(thumb_pil)
         thumb_filtered, _, _ = fibrosis_filter(thumb_np)
-        u, cluster_label, _ = predict_cluster_pil(thumb_filtered, already_filtered=True)
+        u, cluster_label, _ = predict_cluster_pil(thumb_filtered, already_filtered=True, original_pil=thumb_pil)
 
         # ── Resize for frontend display ──
         display_orig = Image.fromarray(full_image)
@@ -537,8 +569,8 @@ def analyze_single_file(file_path):
         filtered_pil, total_pixels, ratio = fibrosis_filter(img_np)
 
         # 3. Run your existing Cluster Prediction
-        # We use the filtered image for prediction
-        u, cluster_label, _ = predict_cluster_pil(filtered_pil, already_filtered=True)
+        # Pass original RGB to VGG16 for meaningful features
+        u, cluster_label, _ = predict_cluster_pil(filtered_pil, already_filtered=True, original_pil=img_pil)
         
         # Handle the label lookup safely
         label_idx = cluster_label.item()
