@@ -20,8 +20,10 @@ from nafld import analyze_single_file, preview_single_file
 from nafld import process_all_images
 app = Flask(__name__)
 CORS(app, expose_headers=['Content-Disposition'])
-# 'C:\\Projects\\NAFLD\\NAFLD-project\\NAFLD\\Images'
-# C:\Projects\Machine Learning\NAFLD\NAFLD-project\NAFLD\Images
+
+# Allow uploads up to 2 GB (chunked uploads bypass this but regular /upload needs it)
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2 GB
+
 UPLOAD_FOLDER = 'C:\\Users\\alexg\\Documents\\NAFLDimages'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'bmp', 'tif', 'tiff', 'svs'}
 
@@ -163,51 +165,42 @@ def upload_file():
         'filename': safe_filename
     }), 200
 
-@app.route("/largefile", methods =['POST'])
+# Dict to track chunked uploads: maps original filename -> timestamped safe name
+_chunked_upload_names = {}
+
+@app.route("/largefile", methods=['POST'])
 def upload_largefile():
-    # print(f"\n \n \n \n   STARTING UPLOAD \n \n \n \n")
-    # Get the file chunk from the request
-    chunk = request.files['file']  # 'file' is the field name used by Resumable.js
-    resumable_filename = request.form['resumableFilename']  # Original file name
-    resumable_chunk_number = request.form['resumableChunkNumber']  # Chunk index (1-based)
+    chunk = request.files['file']
+    resumable_filename = request.form['resumableFilename']
+    resumable_chunk_number = int(request.form['resumableChunkNumber'])
     total_chunks = int(request.form['resumableTotalChunks'])
-    full_file_path = os.path.join(UPLOAD_FOLDER, f'{resumable_filename}')
 
-    print(full_file_path)
+    # On first chunk, generate a timestamped safe name (same logic as /upload)
+    if resumable_chunk_number == 1 and resumable_filename not in _chunked_upload_names:
+        original = secure_filename(resumable_filename)
+        root, ext = os.path.splitext(original)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        _chunked_upload_names[resumable_filename] = f"{root}_{timestamp}{ext.lower()}"
+
+    safe_name = _chunked_upload_names.get(resumable_filename, secure_filename(resumable_filename))
+    full_file_path = os.path.join(UPLOAD_FOLDER, safe_name)
+
     try:
-        with open(full_file_path,'ab') as chunked_file:
-            chunked_file.write(chunk.read())
-    except Exception:
+        with open(full_file_path, 'ab') as f:
+            f.write(chunk.read())
+    except Exception as e:
+        print(f"Chunk write error: {e}")
         return jsonify({"status": "Error writing chunk to file"}), 400
-    
-    if int(resumable_chunk_number) == total_chunks:
-        return jsonify({"status": "File upload complete"}), 200
 
-    #                 final_file.write(chunk_file.read())
-    # # Create the file path for the chunks
-    # chunk_folder = os.path.join(UPLOAD_FOLDER, resumable_filename)
-    # os.makedirs(chunk_folder, exist_ok=True)
-    
-    # # Save the chunk to the folder
-    # chunk_filename = f"{resumable_filename}.part{resumable_chunk_number}"
-    # chunk.save(os.path.join(chunk_folder, chunk_filename))
-    
-    # # Check if all chunks have been uploaded
-    # total_chunks = int(request.form['resumableTotalChunks'])
-    # if len(os.listdir(chunk_folder)) == total_chunks:
-    #     # Assemble all chunks into the final file
-    #     with open(os.path.join(UPLOAD_FOLDER, resumable_filename), 'wb') as final_file:
-    #         for i in range(1, total_chunks + 1):
-    #             chunk_path = os.path.join(chunk_folder, f"{resumable_filename}.part{i}")
-    #             with open(chunk_path, 'rb') as chunk_file:
-    #                 final_file.write(chunk_file.read())
-        
-    #     # Optionally, remove the chunk files after assembling
-    #     for filename in os.listdir(chunk_folder):
-    #         os.remove(os.path.join(chunk_folder, filename))
-    #     os.rmdir(chunk_folder)
+    print(f"Chunk {resumable_chunk_number}/{total_chunks} for {safe_name}")
 
-    #     return jsonify({"status": "File upload complete"}), 200
+    if resumable_chunk_number == total_chunks:
+        # Clean up tracking dict
+        _chunked_upload_names.pop(resumable_filename, None)
+        return jsonify({
+            "status": "File upload complete",
+            "filename": safe_name
+        }), 200
 
     return jsonify({"status": "Chunk upload successful"}), 200
 

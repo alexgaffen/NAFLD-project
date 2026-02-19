@@ -9,17 +9,94 @@ const ImageSubmission = () => {
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [errorMessage, setErrorMessage] = useState("");
     const [isDragging, setIsDragging] = useState(false);
+    const [uploadProgress, setUploadProgress] = useState(0);
     const fileInputRef = useRef(null);
 
     const displayedResult = analysisResult || previewResult;
 
-    const handleFile = useCallback((file) => {
+    const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB per chunk
+    const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024; // 10 MB — use chunking above this
+
+    // ── Chunked upload for large files (SVS, big TIF) ──
+    const uploadChunked = async (file) => {
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+        let serverFilename = null;
+
+        for (let i = 0; i < totalChunks; i++) {
+            const start = i * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, file.size);
+            const blob = file.slice(start, end);
+
+            const form = new FormData();
+            form.append('file', blob, file.name);
+            form.append('resumableFilename', file.name);
+            form.append('resumableChunkNumber', String(i + 1));
+            form.append('resumableTotalChunks', String(totalChunks));
+
+            const res = await fetch('http://127.0.0.1:5000/largefile', { method: 'POST', body: form });
+            if (!res.ok) throw new Error(`Chunk ${i + 1}/${totalChunks} failed: ${await res.text()}`);
+
+            const data = await res.json();
+            setUploadProgress(Math.round(((i + 1) / totalChunks) * 100));
+
+            // Last chunk returns the filename
+            if (data.filename) serverFilename = data.filename;
+        }
+
+        if (!serverFilename) throw new Error('Chunked upload completed but no filename returned.');
+        return serverFilename;
+    };
+
+    // ── Simple upload for small files ──
+    const uploadSimple = async (file) => {
+        const formData = new FormData();
+        formData.append('file', file);
+        const res = await fetch('http://127.0.0.1:5000/upload', { method: 'POST', body: formData });
+        if (!res.ok) throw new Error(`Upload failed: ${await res.text()}`);
+        const data = await res.json();
+        if (!data.filename) throw new Error('Upload succeeded but no filename returned.');
+        setUploadProgress(100);
+        return data.filename;
+    };
+
+    const handleFile = useCallback(async (file) => {
         if (!file) return;
         setSelectedImage(file);
         setErrorMessage("");
         setPreviewResult(null);
         setAnalysisResult(null);
         setUploadedFilename("");
+        setUploadProgress(0);
+
+        try {
+            setIsUploading(true);
+
+            // Choose upload strategy based on file size
+            const filename = file.size > LARGE_FILE_THRESHOLD
+                ? await uploadChunked(file)
+                : await uploadSimple(file);
+
+            setUploadedFilename(filename);
+
+            // Fetch preview immediately
+            const previewResponse = await fetch(`http://127.0.0.1:5000/preview/${encodeURIComponent(filename)}`);
+            if (previewResponse.ok) {
+                setPreviewResult(await previewResponse.json());
+            }
+
+            // Trigger analysis automatically
+            setIsUploading(false);
+            setIsAnalyzing(true);
+            const analyzeResponse = await fetch(`http://127.0.0.1:5000/analyze/${encodeURIComponent(filename)}`);
+            if (!analyzeResponse.ok) throw new Error(`Analyze failed: ${await analyzeResponse.text()}`);
+            setAnalysisResult(await analyzeResponse.json());
+        } catch (error) {
+            console.error("Pipeline error:", error);
+            setErrorMessage(error.message || "An error occurred during processing.");
+        } finally {
+            setIsUploading(false);
+            setIsAnalyzing(false);
+        }
     }, []);
 
     const handleDragOver = (e) => { e.preventDefault(); setIsDragging(true); };
@@ -27,8 +104,10 @@ const ImageSubmission = () => {
     const handleDrop = (e) => {
         e.preventDefault();
         setIsDragging(false);
-        const file = e.dataTransfer.files[0];
-        handleFile(file);
+        const files = e.dataTransfer.files;
+        if (files && files.length > 0) {
+            handleFile(files[0]);
+        }
     };
     const handleClick = () => fileInputRef.current?.click();
 
@@ -58,53 +137,15 @@ const ImageSubmission = () => {
         }
     };
 
-    const handleRunPipeline = async () => {
-        setErrorMessage("");
-        setAnalysisResult(null);
-        setPreviewResult(null);
-        setUploadedFilename("");
-        if (!image) { setErrorMessage("Please select an image to upload."); return; }
-
-        const formData = new FormData();
-        formData.append('file', image);
-
-        try {
-            setIsUploading(true);
-            const uploadResponse = await fetch('http://127.0.0.1:5000/upload', { method: 'POST', body: formData });
-            if (!uploadResponse.ok) throw new Error(`Upload failed: ${await uploadResponse.text()}`);
-            const uploadResult = await uploadResponse.json();
-            if (!uploadResult.filename) throw new Error("Upload succeeded but no filename returned.");
-
-            setUploadedFilename(uploadResult.filename);
-
-            const previewResponse = await fetch(`http://127.0.0.1:5000/preview/${encodeURIComponent(uploadResult.filename)}`);
-            if (!previewResponse.ok) throw new Error(`Preview failed: ${await previewResponse.text()}`);
-            setPreviewResult(await previewResponse.json());
-
-            setIsAnalyzing(true);
-            const analyzeResponse = await fetch(`http://127.0.0.1:5000/analyze/${encodeURIComponent(uploadResult.filename)}`);
-            if (!analyzeResponse.ok) throw new Error(`Analyze failed: ${await analyzeResponse.text()}`);
-            const analyzeData = await analyzeResponse.json();
-            setAnalysisResult(analyzeData);
-        } catch (error) {
-            console.error('Error:', error);
-            setErrorMessage(error.message || 'Upload/preview failed.');
-        } finally {
-            setIsUploading(false);
-            setIsAnalyzing(false);
-        }
-    };
-
     const fibrosisRatio = displayedResult?.fibrosis_ratio;
-    const pipelineStatus = analysisResult
-        ? 'Diagnosis Complete'
-        : isAnalyzing
+    // Simple statuses for the UI label
+    const pipelineStatus = isAnalyzing
         ? 'Running Diagnosis…'
         : isUploading
-        ? 'Uploading…'
-        : image
-        ? 'Ready — Click Diagnose'
-        : 'Upload a file to start';
+        ? `Uploading${uploadProgress > 0 && uploadProgress < 100 ? '… ' + uploadProgress + '%' : '…'}`
+        : analysisResult
+        ? 'Diagnosis Complete'
+        : null;
 
     return (
         <div className="main-grid">
@@ -123,7 +164,19 @@ const ImageSubmission = () => {
                         {displayedResult?.original_image ? (
                             <img alt="Original PSR" src={displayedResult.original_image} className="preview-image" />
                         ) : image ? (
-                            <img alt="Selected" src={URL.createObjectURL(image)} className="preview-image" />
+                            image.name.match(/\.(tif|tiff|svs)$/i) ? (
+                                <div className="placeholder-text" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', alignItems: 'center' }}>
+                                    <span style={{ fontSize: '1.5rem' }}>⌛</span>
+                                    <span>{image.name}</span>
+                                    <span style={{ fontSize: '0.75rem', opacity: 0.7 }}>Generating preview...</span>
+                                </div>
+                            ) : (
+                                <img 
+                                    alt="Selected" 
+                                    src={URL.createObjectURL(image)} 
+                                    className="preview-image" 
+                                />
+                            )
                         ) : (
                             <div className="placeholder-text">Click or Drop to Upload</div>
                         )}
@@ -160,13 +213,10 @@ const ImageSubmission = () => {
                         </div>
                     </div>
 
-                    <button
-                        className="run-btn"
-                        onClick={handleRunPipeline}
-                        disabled={isUploading || isAnalyzing || !image}
-                    >
+                    <div className="status-indicator" style={{ color: isAnalyzing ? '#4ecdc4' : '#8a9bae', fontSize: '0.85rem' }}>
+                        {isAnalyzing && <span style={{ marginRight: '0.5rem' }}>⏳</span>}
                         {pipelineStatus}
-                    </button>
+                    </div>
                 </div>
 
                 {errorMessage && <p className="error-text">{errorMessage}</p>}
