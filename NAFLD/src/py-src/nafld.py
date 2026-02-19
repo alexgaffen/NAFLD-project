@@ -76,13 +76,13 @@ best_m = model_params.get('best_m', 1.5) # Default to 1.5 if missing
 #8f7972 -> 143,121,114
 # 0.560,0.474,0.447
 
-# stain_matrix = np.array([[0.148, 0.722, 0.618],
-#                          [0.462, 0.602, 0.651],
-#                          [0.187, 0.523, 0.831]])
+stain_matrix = np.array([[0.148, 0.722, 0.618],
+                        [0.462, 0.602, 0.651],
+                        [0.187, 0.523, 0.831]])
 
-stain_matrix = np.array([[0.39, 0.39, 0.39],  
-                         [0.560, 0.474, 0.447],
-                         [0.29, 0.33, 0.29]])
+# stain_matrix = np.array([[0.39, 0.39, 0.39],  
+#                          [0.560, 0.474, 0.447],
+#                          [0.29, 0.33, 0.29]])
 
 # stain_matrix = np.array([[0.3, 0.3, 0.3],  
 #                          [0.560, 0.474, 0.447],
@@ -123,12 +123,8 @@ def fibrosis_filter(window, stain_matrix=None):
     #Select the stain for red regions
     red_stain = stains[:, :, 0]
 
-    print(f"[DEBUG stain_matrix row0]: {stain_matrix[0]}")
-    print(f"[DEBUG red_stain]: min={red_stain.min():.3f}  mean={red_stain.mean():.3f}  max={red_stain.max():.3f}")
-    print(f"[DEBUG threshold hits]: >1.5 → {(red_stain > 1.5).mean()*100:.1f}%  |  >1.8 → {(red_stain > 1.8).mean()*100:.1f}%  |  >2.0 → {(red_stain > 2.0).mean()*100:.1f}%")
-
     hsv_img = cv2.cvtColor(img_array, cv2.COLOR_RGB2HSV)
-    mask = (red_stain > 1.5) & (img_array.sum(axis=-1) > 50)
+    mask = (red_stain > 2.5) & (img_array.sum(axis=-1) > 50)
     mask = mask.astype(np.uint8) * 255
     total_selected_pixels = np.sum(mask == 255)
     total_pixels = mask.size
@@ -361,6 +357,138 @@ def open_image_for_processing(file_path, max_side=1024):
     return img_pil
 
 
+# ── Patch helpers ──────────────────────────────────────────────────
+
+def _is_tissue_patch(patch_np, white_thresh=220, white_frac=0.80):
+    """Return True if the patch contains real tissue, not blank slide background."""
+    gray = np.mean(patch_np, axis=2)
+    return (np.sum(gray > white_thresh) / gray.size) < white_frac
+
+
+def _select_slide_level(slide, max_dim=4096):
+    """Pick the highest-resolution level whose longest side fits in *max_dim*."""
+    for level, (w, h) in enumerate(slide.level_dimensions):
+        if max(w, h) <= max_dim:
+            return level
+    return len(slide.level_dimensions) - 1
+
+
+def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=4096, progress_callback=None):
+    """
+    Patch-based analysis for SVS (and large TIF) files.
+
+    1. Opens the image at a resolution level ≤ max_processing_dim.
+    2. Tiles it into patch_size × patch_size squares.
+    3. Skips background patches (blank white areas).
+    4. Runs fibrosis_filter on every tissue patch, stitches the mask.
+    5. Aggregates fibrosis ratio from *all* tissue patches.
+    6. Classification still uses a thumbnail so the trained PCA/FCM
+       model (which was trained on whole-tissue views) gets compatible input.
+
+    progress_callback(current_patch, total_candidates, tissue_count) is called
+    after every tile so the frontend can show live updates.
+    """
+    try:
+        import traceback as _tb
+        is_svs = file_path.lower().endswith('.svs')
+
+        # ── Load the image at a workable resolution ──
+        if is_svs:
+            slide = OpenSlide(file_path)
+            level = _select_slide_level(slide, max_processing_dim)
+            level_w, level_h = slide.level_dimensions[level]
+            full_pil = slide.read_region((0, 0), level, (level_w, level_h)).convert("RGB")
+            full_image = np.array(full_pil)
+            thumb_pil = slide.get_thumbnail((1024, 1024)).convert("RGB")
+            slide.close()
+            print(f"[Patch] SVS opened at level {level} → {level_w}×{level_h}")
+        else:
+            img = Image.open(file_path).convert("RGB")
+            if max(img.size) > max_processing_dim:
+                img.thumbnail((max_processing_dim, max_processing_dim), Image.LANCZOS)
+            full_image = np.array(img)
+            thumb_pil = img.copy()
+            thumb_pil.thumbnail((1024, 1024), Image.LANCZOS)
+
+        h, w = full_image.shape[:2]
+        full_mask = np.zeros((h, w, 3), dtype=np.uint8)
+
+        total_tissue_pixels = 0
+        total_fibrosis_pixels = 0
+        patch_count = 0
+
+        # Count total candidate tiles for progress reporting
+        rows = list(range(0, h, patch_size))
+        cols = list(range(0, w, patch_size))
+        total_tiles = len(rows) * len(cols)
+        current_tile = 0
+
+        # ── Tile and process ──
+        for py in rows:
+            for px in cols:
+                current_tile += 1
+                patch = full_image[py:py + patch_size, px:px + patch_size]
+                ph, pw_actual = patch.shape[:2]
+
+                if ph < 32 or pw_actual < 32:
+                    continue
+                if not _is_tissue_patch(patch):
+                    # Report progress even for skipped tiles
+                    if progress_callback:
+                        progress_callback(current_tile, total_tiles, patch_count)
+                    continue
+
+                mask_pil, selected_px, _ = fibrosis_filter(patch)
+                mask_np = np.array(mask_pil)
+
+                full_mask[py:py + ph, px:px + pw_actual] = mask_np
+                total_tissue_pixels += ph * pw_actual
+                total_fibrosis_pixels += selected_px
+                patch_count += 1
+
+                if progress_callback:
+                    progress_callback(current_tile, total_tiles, patch_count)
+
+        overall_ratio = (total_fibrosis_pixels / total_tissue_pixels * 100) if total_tissue_pixels > 0 else 0.0
+        print(f"[Patch] {patch_count} tissue patches — fibrosis {overall_ratio:.2f}%")
+
+        # ── Classification on thumbnail (model-compatible) ──
+        thumb_np = np.array(thumb_pil)
+        thumb_filtered, _, _ = fibrosis_filter(thumb_np)
+        u, cluster_label, _ = predict_cluster_pil(thumb_filtered, already_filtered=True)
+
+        # ── Resize for frontend display ──
+        display_orig = Image.fromarray(full_image)
+        display_orig.thumbnail((1024, 1024), Image.LANCZOS)
+
+        display_mask = Image.fromarray(full_mask)
+        display_mask.thumbnail((1024, 1024), Image.LANCZOS)
+
+        label_idx = cluster_label.item()
+        label_text = cluster_lookup_table.get(label_idx, f"Unknown Cluster {label_idx}")
+        membership_scores = {
+            membership_column_names[i]: float(u[i][0]) for i in range(4)
+        }
+
+        return {
+            "status": "success",
+            "original_image": f"data:image/jpeg;base64,{pil_to_b64(display_orig)}",
+            "filtered_image": f"data:image/jpeg;base64,{pil_to_b64(display_mask)}",
+            "fibrosis_ratio": float(overall_ratio),
+            "cluster_label": label_text,
+            "membership_scores": membership_scores,
+            "patch_count": patch_count,
+            "None": membership_scores["None"],
+            "Perisinusoidal": membership_scores["Perisinusoidal"],
+            "Bridging": membership_scores["Bridging"],
+            "Cirrosis": membership_scores["Cirrosis"],
+        }
+    except Exception as e:
+        print(f"Error in patched analysis: {e}")
+        import traceback; traceback.print_exc()
+        return {"status": "error", "message": str(e)}
+
+
 def preview_single_file(file_path, preview_size=768):
     """
     Fast preview path: generates original + fibrosis mask on downsampled image.
@@ -383,8 +511,21 @@ def preview_single_file(file_path, preview_size=768):
 
 def analyze_single_file(file_path):
     """
-    Called by main.py. Opens the image, runs the AI, returns base64 images to frontend.
+    Called by main.py. Routes to patch-based analysis for SVS / large TIF,
+    or the fast thumbnail path for small images (JPG, PNG, small TIF).
     """
+    is_svs = file_path.lower().endswith('.svs')
+    is_large_tif = (
+        file_path.lower().endswith(('.tif', '.tiff'))
+        and os.path.getsize(file_path) > 50 * 1024 * 1024  # > 50 MB
+    )
+
+    if is_svs or is_large_tif:
+        print(f"[analyze] Using PATCH-BASED pipeline for {os.path.basename(file_path)}")
+        return analyze_single_file_patched(file_path)
+
+    # ── Fast thumbnail path for small images ──
+    print(f"[analyze] Using THUMBNAIL pipeline for {os.path.basename(file_path)}")
     try:
         # 1. Open the image
         img_pil = open_image_for_processing(file_path, max_side=1024)

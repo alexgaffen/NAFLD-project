@@ -14,10 +14,13 @@ import zipfile
 import io
 import csv
 from werkzeug.utils import secure_filename
-from nafld import analyze_single_file, preview_single_file
+from nafld import analyze_single_file, preview_single_file, analyze_single_file_patched
 
 # sys.path.append("C:\\Projects\\Machine Learning\\NAFLD\\NAFLD-project\\NAFLD\\src\\py-src\\nafld.py")
 from nafld import process_all_images
+import json
+import queue
+import threading
 app = Flask(__name__)
 CORS(app, expose_headers=['Content-Disposition'])
 
@@ -48,6 +51,65 @@ def analyze_file(filename):
     result = analyze_single_file(file_path)
 
     return jsonify(result), 200
+
+
+def _is_patchable(file_path):
+    """Return True if the file should use patch-based SSE analysis."""
+    if file_path.lower().endswith('.svs'):
+        return True
+    if file_path.lower().endswith(('.tif', '.tiff')):
+        return os.path.getsize(file_path) > 50 * 1024 * 1024
+    return False
+
+
+@app.route("/analyze-stream/<filename>", methods=['GET'])
+def analyze_file_stream(filename):
+    """SSE endpoint — streams patch progress then the final result."""
+    file_path = resolve_uploaded_file_path(filename)
+    if not file_path:
+        return jsonify({'error': 'File not found'}), 404
+
+    if not _is_patchable(file_path):
+        # Not a patch candidate: run normal analysis and return as a single SSE result event
+        result = analyze_single_file(file_path)
+        def single_event():
+            yield f"data: {json.dumps({'type': 'result', 'data': result})}\n\n"
+        return Response(single_event(), mimetype='text/event-stream',
+                        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+    progress_queue = queue.Queue()
+
+    def on_progress(current, total, tissue_count):
+        progress_queue.put({
+            'type': 'progress',
+            'current': current,
+            'total': total,
+            'tissue_patches': tissue_count,
+        })
+
+    result_holder = [None]
+
+    def worker():
+        result_holder[0] = analyze_single_file_patched(file_path, progress_callback=on_progress)
+        progress_queue.put({'type': 'done'})
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+
+    def generate():
+        while True:
+            try:
+                msg = progress_queue.get(timeout=120)
+            except queue.Empty:
+                break
+            if msg['type'] == 'done':
+                yield f"data: {json.dumps({'type': 'result', 'data': result_holder[0]})}\n\n"
+                break
+            else:
+                yield f"data: {json.dumps(msg)}\n\n"
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
 @app.route("/preview/<filename>", methods=['GET'])
