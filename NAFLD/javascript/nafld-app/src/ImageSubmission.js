@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useCallback } from "react";
 
 const ImageSubmission = () => {
     const [image, setSelectedImage] = useState(null);
@@ -8,30 +8,42 @@ const ImageSubmission = () => {
     const [isUploading, setIsUploading] = useState(false);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [errorMessage, setErrorMessage] = useState("");
+    const [isDragging, setIsDragging] = useState(false);
+    const fileInputRef = useRef(null);
 
     const displayedResult = analysisResult || previewResult;
 
-    const handleDownloadCsv = async () => {
-        if (!uploadedFilename) {
-            setErrorMessage("No uploaded file available for CSV export.");
-            return;
-        }
+    const handleFile = useCallback((file) => {
+        if (!file) return;
+        setSelectedImage(file);
+        setErrorMessage("");
+        setPreviewResult(null);
+        setAnalysisResult(null);
+        setUploadedFilename("");
+    }, []);
 
+    const handleDragOver = (e) => { e.preventDefault(); setIsDragging(true); };
+    const handleDragLeave = (e) => { e.preventDefault(); setIsDragging(false); };
+    const handleDrop = (e) => {
+        e.preventDefault();
+        setIsDragging(false);
+        const file = e.dataTransfer.files[0];
+        handleFile(file);
+    };
+    const handleClick = () => fileInputRef.current?.click();
+
+    const handleDownloadCsv = async () => {
+        if (!uploadedFilename) { setErrorMessage("No uploaded file available for CSV export."); return; }
         try {
             setErrorMessage("");
             const response = await fetch(`http://127.0.0.1:5000/download-single/${encodeURIComponent(uploadedFilename)}`);
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`CSV download failed: ${errorText}`);
-            }
-
+            if (!response.ok) throw new Error(`CSV download failed: ${await response.text()}`);
             const blob = await response.blob();
             const disposition = response.headers.get('Content-Disposition');
             let downloadFilename = `${uploadedFilename}.csv`;
             if (disposition && disposition.includes('filename=')) {
                 downloadFilename = disposition.split('filename=')[1].replace(/"/g, '').trim();
             }
-
             const url = window.URL.createObjectURL(blob);
             const link = document.createElement('a');
             link.href = url;
@@ -46,66 +58,34 @@ const ImageSubmission = () => {
         }
     };
 
-    const handleRunPipeline = async (event) => {
-        event.preventDefault();
-        console.log("SUBMITTED");
+    const handleRunPipeline = async () => {
         setErrorMessage("");
         setAnalysisResult(null);
         setPreviewResult(null);
         setUploadedFilename("");
-        
-        if (!image) {
-            setErrorMessage("Please select an image to upload.");
-            return;
-        }
+        if (!image) { setErrorMessage("Please select an image to upload."); return; }
 
         const formData = new FormData();
         formData.append('file', image);
 
         try {
             setIsUploading(true);
-            // 1. Upload the file
-            const uploadResponse = await fetch('http://127.0.0.1:5000/upload', {
-                method: 'POST',
-                body: formData
-            });
-
-            if (!uploadResponse.ok) {
-                const errorText = await uploadResponse.text();
-                throw new Error(`Upload failed: ${errorText}`);
-            }
-
+            const uploadResponse = await fetch('http://127.0.0.1:5000/upload', { method: 'POST', body: formData });
+            if (!uploadResponse.ok) throw new Error(`Upload failed: ${await uploadResponse.text()}`);
             const uploadResult = await uploadResponse.json();
-            console.log("Upload Success:", uploadResult);
+            if (!uploadResult.filename) throw new Error("Upload succeeded but no filename returned.");
 
-            // 2. Trigger fast preview
-            if (uploadResult.filename) {
-                console.log("Requesting analysis for:", uploadResult.filename);
-                setUploadedFilename(uploadResult.filename);
+            setUploadedFilename(uploadResult.filename);
 
-                const previewResponse = await fetch(`http://127.0.0.1:5000/preview/${encodeURIComponent(uploadResult.filename)}`);
-                if (!previewResponse.ok) {
-                    const errorText = await previewResponse.text();
-                    throw new Error(`Preview failed: ${errorText}`);
-                }
+            const previewResponse = await fetch(`http://127.0.0.1:5000/preview/${encodeURIComponent(uploadResult.filename)}`);
+            if (!previewResponse.ok) throw new Error(`Preview failed: ${await previewResponse.text()}`);
+            setPreviewResult(await previewResponse.json());
 
-                const previewData = await previewResponse.json();
-                setPreviewResult(previewData);
-
-                // 3. Trigger full diagnosis as part of same action
-                setIsAnalyzing(true);
-                const analyzeResponse = await fetch(`http://127.0.0.1:5000/analyze/${encodeURIComponent(uploadResult.filename)}`);
-                if (!analyzeResponse.ok) {
-                    const errorText = await analyzeResponse.text();
-                    throw new Error(`Analyze failed: ${errorText}`);
-                }
-                const analyzeData = await analyzeResponse.json();
-                setAnalysisResult(analyzeData);
-                console.log("Analysis Result:", analyzeData);
-            } else {
-                throw new Error("Upload succeeded but no filename was returned by backend.");
-            }
-
+            setIsAnalyzing(true);
+            const analyzeResponse = await fetch(`http://127.0.0.1:5000/analyze/${encodeURIComponent(uploadResult.filename)}`);
+            if (!analyzeResponse.ok) throw new Error(`Analyze failed: ${await analyzeResponse.text()}`);
+            const analyzeData = await analyzeResponse.json();
+            setAnalysisResult(analyzeData);
         } catch (error) {
             console.error('Error:', error);
             setErrorMessage(error.message || 'Upload/preview failed.');
@@ -115,82 +95,128 @@ const ImageSubmission = () => {
         }
     };
 
-    return ( 
-        <div className="diagnosis-layout">
-            <div className="preview-panel">
-                <h2>Image Preview</h2>
+    const fibrosisRatio = displayedResult?.fibrosis_ratio;
+    const pipelineStatus = analysisResult
+        ? 'Diagnosis Complete'
+        : isAnalyzing
+        ? 'Running Diagnosis…'
+        : isUploading
+        ? 'Uploading…'
+        : image
+        ? 'Ready — Click Diagnose'
+        : 'Upload a file to start';
+
+    return (
+        <div className="main-grid">
+            {/* ── Left: image panels ── */}
+            <div className="images-col">
                 <div className="comparison-grid">
-                    <div className="preview-card">
-                        <h3>Original PSR Staining</h3>
+                    {/* Original */}
+                    <div
+                        className={`img-panel drop-zone ${isDragging ? 'drag-over' : ''}`}
+                        onDragOver={handleDragOver}
+                        onDragLeave={handleDragLeave}
+                        onDrop={handleDrop}
+                        onClick={handleClick}
+                    >
+                        <span className="img-label">Original PSR Staining</span>
                         {displayedResult?.original_image ? (
                             <img alt="Original PSR" src={displayedResult.original_image} className="preview-image" />
                         ) : image ? (
                             <img alt="Selected" src={URL.createObjectURL(image)} className="preview-image" />
                         ) : (
-                            <div className="preview-placeholder">Upload a file to preview</div>
+                            <div className="placeholder-text">Click or Drop to Upload</div>
                         )}
+                        <input
+                            ref={fileInputRef}
+                            type="file"
+                            accept=".svs,.tif,.tiff,.jpg,.jpeg,.png,.bmp"
+                            style={{ display: 'none' }}
+                            onChange={(e) => handleFile(e.target.files[0])}
+                        />
                     </div>
-                    <div className="preview-card">
-                        <h3>Fibrosis</h3>
+
+                    {/* Fibrosis mask */}
+                    <div className="img-panel">
+                        <span className="img-label accent">AI Fibrosis Mask</span>
                         {displayedResult?.filtered_image ? (
                             <img alt="Fibrosis mask" src={displayedResult.filtered_image} className="preview-image" />
                         ) : (
-                            <div className="preview-placeholder">Fibrosis mask appears after preview</div>
+                            <div className="placeholder-text">Fibrosis mask appears after analysis</div>
                         )}
                     </div>
                 </div>
 
-                <form className="upload-form" onSubmit={handleRunPipeline}>
-                    <input
-                        type="file"
-                        name="myImage"
-                        accept=".svs,.tif,.tiff,.jpg,.jpeg,.png,.bmp"
-                        onChange={(event) => {
-                            setSelectedImage(event.target.files[0]);
-                            setErrorMessage("");
-                            setPreviewResult(null);
-                            setAnalysisResult(null);
-                            setUploadedFilename("");
-                        }}
-                    />
-                    <button type="submit" disabled={isUploading || isAnalyzing || !image}>
-                        {isUploading || isAnalyzing ? 'Processing...' : 'Upload, Preview & Diagnose'}
+                {/* Bottom bar */}
+                <div className="bottom-bar">
+                    <div className="file-info">
+                        <span className="file-icon">📄</span>
+                        <span className="file-name">{image ? image.name : 'No file selected'}</span>
+                        <div
+                            className="change-link"
+                            onClick={handleClick}
+                        >
+                            Click or Drop to Change
+                        </div>
+                    </div>
+
+                    <button
+                        className="run-btn"
+                        onClick={handleRunPipeline}
+                        disabled={isUploading || isAnalyzing || !image}
+                    >
+                        {pipelineStatus}
                     </button>
-                </form>
+                </div>
+
+                {errorMessage && <p className="error-text">{errorMessage}</p>}
             </div>
 
-            <aside className="diagnosis-panel">
-                <h2>Diagnosis</h2>
-                <div className="diag-card">
-                    <p className="diag-label">Fibrosis Extent</p>
-                    <p className="diag-value">
-                        {displayedResult?.fibrosis_ratio !== undefined
-                            ? `${Number(displayedResult.fibrosis_ratio).toFixed(2)}%`
+            {/* ── Right: diagnosis report ── */}
+            <aside className="report-col">
+                <h2 className="report-title">DIAGNOSIS REPORT</h2>
+
+                <div className="report-card">
+                    <p className="report-label">Fibrosis Extent</p>
+                    <div className="extent-bar-track">
+                        <div
+                            className="extent-bar-fill"
+                            style={{ width: `${Math.min(fibrosisRatio ?? 0, 100)}%` }}
+                        />
+                    </div>
+                    <p className="report-value">
+                        {fibrosisRatio !== undefined ? `${Number(fibrosisRatio).toFixed(2)}%` : '--'}
+                    </p>
+                </div>
+
+                <div className="report-card">
+                    <p className="report-label">Classification</p>
+                    <p className="report-class">
+                        {analysisResult?.cluster_label
+                            ? analysisResult.cluster_label.replace(/^Category \w: /, 'Category $&'.slice(9, 10) + ': ').length
+                                ? analysisResult.cluster_label
+                                : '--'
                             : '--'}
                     </p>
                 </div>
-                <div className="diag-card">
-                    <p className="diag-label">Classification</p>
-                    <p className="diag-classification">
-                        {analysisResult?.cluster_label || (isUploading || isAnalyzing ? 'Running diagnosis...' : 'Will run automatically after upload')}
+
+                <div className="report-card info-card">
+                    <p>
+                        <strong>Visualization:</strong> White pixels indicate detected collagen fibers
+                        (fibrosis) via Fuzzy C-Means clustering on the VGG16 feature space.
                     </p>
                 </div>
 
                 <button
-                    type="button"
-                    className="diagnose-btn"
+                    className="csv-btn"
                     onClick={handleDownloadCsv}
                     disabled={!uploadedFilename || isUploading || isAnalyzing}
                 >
                     Download CSV
                 </button>
-
-                {uploadedFilename && <p className="small-note">Uploaded as: {uploadedFilename}</p>}
-                {errorMessage && <p className="error-text">{errorMessage}</p>}
             </aside>
         </div>
-
     );
-}
- 
+};
+
 export default ImageSubmission;
