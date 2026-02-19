@@ -5,7 +5,7 @@
 # The path can also be read from a config file, etc.
 
 # Home and lab path happen to be the same
-OPENSLIDE_PATH = r'C:\\openslide\\openslide-bin-4.0.0.6-windows-x64\\bin'
+OPENSLIDE_PATH = r'C:\\Program Files\\openslide-bin-4.0.0.11-windows-x64\\bin'
 
 
 import os
@@ -47,7 +47,8 @@ from IPython.display import display
 # drive.mount('/content/drive', force_remount=True)
 psr_results = []
 
-model_save_path = 'C:\\Projects\\Machine Learning\\nafld backend\\nafld_back\\Model\\PCA'
+# Point to the 'models' subfolder
+model_save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
 
 data_path = './data'
 '''
@@ -64,20 +65,20 @@ with open(os.path.join(model_save_path, 'model_params.pkl'), 'rb') as file:
     model_params = pickle.load(file)
 
 centroids = model_params['centroids']
-u = model_params['u']
-u0 = model_params['u0']
-d = model_params['d']
-jm = model_params['jm']
-p = model_params['p']
-fpc = model_params['fpc']
-best_m = model_params['best_m']
 
+# u = model_params['u']
+# u0 = model_params['u0']
+# d = model_params['d']
+# jm = model_params['jm']
+# p = model_params['p']
+# fpc = model_params['fpc']
+best_m = model_params.get('best_m', 1.5) # Default to 1.5 if missing
 #8f7972 -> 143,121,114
 # 0.560,0.474,0.447
 
-stain_matrix = np.array([[0.148, 0.722, 0.618],
-                         [0.462, 0.602, 0.651],
-                         [0.187, 0.523, 0.831]])
+# stain_matrix = np.array([[0.148, 0.722, 0.618],
+#                          [0.462, 0.602, 0.651],
+#                          [0.187, 0.523, 0.831]])
 
 stain_matrix = np.array([[0.39, 0.39, 0.39],  
                          [0.560, 0.474, 0.447],
@@ -98,6 +99,8 @@ cluster_lookup_table = {
     3: 'Category D: Cirrosis',
 }
 
+membership_column_names = ['None', 'Perisinusoidal', 'Bridging', 'Cirrosis']
+
 
 #Helper functions
 def extract_features(pil_img):
@@ -109,7 +112,10 @@ def extract_features(pil_img):
     predictions = predictions.flatten()
     return predictions
 
-def fibrosis_filter(window, stain_matrix = stain_matrix):
+def fibrosis_filter(window, stain_matrix=None):
+    if stain_matrix is None:
+        stain_matrix = globals()['stain_matrix']
+
     img_array = np.array(window)
     img_float = img_array.astype(np.float32) / 255.0
     #perform color deconv
@@ -117,8 +123,12 @@ def fibrosis_filter(window, stain_matrix = stain_matrix):
     #Select the stain for red regions
     red_stain = stains[:, :, 0]
 
+    print(f"[DEBUG stain_matrix row0]: {stain_matrix[0]}")
+    print(f"[DEBUG red_stain]: min={red_stain.min():.3f}  mean={red_stain.mean():.3f}  max={red_stain.max():.3f}")
+    print(f"[DEBUG threshold hits]: >1.5 → {(red_stain > 1.5).mean()*100:.1f}%  |  >1.8 → {(red_stain > 1.8).mean()*100:.1f}%  |  >2.0 → {(red_stain > 2.0).mean()*100:.1f}%")
+
     hsv_img = cv2.cvtColor(img_array, cv2.COLOR_RGB2HSV)
-    mask = (red_stain > 0.9) & (img_array.sum(axis=-1) > 50)
+    mask = (red_stain > 1.5) & (img_array.sum(axis=-1) > 50)
     mask = mask.astype(np.uint8) * 255
     total_selected_pixels = np.sum(mask == 255)
     total_pixels = mask.size
@@ -131,11 +141,15 @@ def fibrosis_filter(window, stain_matrix = stain_matrix):
 
     return result_image_pil, total_selected_pixels, selected_ratio
 
-def predict_cluster_pil(pil_image):
+def predict_cluster_pil(pil_image, already_filtered=False):
     image = np.array(pil_image)
-    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    img, pxl, percentage = fibrosis_filter(image)
+
+    if already_filtered:
+        img = pil_image
+        percentage = None
+    else:
+        img, _, percentage = fibrosis_filter(image)
+
     features = extract_features(img)
     reduc_features = pca_model.transform([features])
     u, _, _, _, _, _ = cmeans_predict(reduc_features.T, centroids, m=best_m, error=0.1, maxiter=100)
@@ -162,7 +176,7 @@ def update_filter_slide_legacy(change):
     region = region.convert("RGB")  # Convert to RGB
 
     result_image_pil, total_selected_pixels, selected_ratio = fibrosis_filter(region)
-    u, cluster_label, _ = predict_cluster_pil(result_image_pil)
+    u, cluster_label, _ = predict_cluster_pil(result_image_pil, already_filtered=True)
 
     with output:
         output.clear_output(wait=True)
@@ -196,7 +210,7 @@ def update_filter_slide(image_folder,file,level_slider,x_slider,y_slider,window_
     region = region.convert("RGB")  # Convert to RGB
 
     result_image_pil, total_selected_pixels, selected_ratio = fibrosis_filter(region)
-    u, cluster_label, _ = predict_cluster_pil(result_image_pil)
+    u, cluster_label, _ = predict_cluster_pil(result_image_pil, already_filtered=True)
 
     output = widgets.Output()
 
@@ -231,7 +245,7 @@ def update_filter_image(change):
     original_image = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
     output = widgets.Output()
     result_image_pil, total_selected_pixels, selected_ratio = fibrosis_filter(original_image)
-    u, cluster_label, _ = predict_cluster_pil(result_image_pil)
+    u, cluster_label, _ = predict_cluster_pil(result_image_pil, already_filtered=True)
     with output:
         output.clear_output(wait=True)
         plt.figure(figsize=(30, 20))
@@ -256,15 +270,18 @@ def update_filter_image(change):
         print(f"Cluster Label: {cluster_lookup_table[cluster_label.item()]} \n \n")
 
 
-def predict_cluster(image_path, stain_matrix = stain_matrix):
-  image = cv2.imread(image_path)
-  image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-  img, pxl, percentage = fibrosis_filter(image, stain_matrix)
-  features = extract_features(img)
-  reduc_features = pca_model.transform([features])
-  u, _, _, _, _, _ = cmeans_predict(reduc_features.T, centroids, m=best_m, error=0.1, maxiter=100)
-  cluster_label = np.argmax(u, axis=0)
-  return u, cluster_label, percentage
+def predict_cluster(image_path, stain_matrix=None):
+    if stain_matrix is None:
+        stain_matrix = globals()['stain_matrix']
+
+    image = cv2.imread(image_path)
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    img, pxl, percentage = fibrosis_filter(image, stain_matrix)
+    features = extract_features(img)
+    reduc_features = pca_model.transform([features])
+    u, _, _, _, _, _ = cmeans_predict(reduc_features.T, centroids, m=best_m, error=0.1, maxiter=100)
+    cluster_label = np.argmax(u, axis=0)
+    return u, cluster_label, percentage
 
 def process_images_in_folder(folder_path, predict_cluster_func):
     results = []
@@ -321,6 +338,92 @@ def process_all_images(folder_path):
     
     return pd.concat([df_non_svs, df_svs], ignore_index=True)
 
+import base64
+from io import BytesIO
+
+
+def pil_to_b64(img):
+    buffered = BytesIO()
+    img.save(buffered, format="JPEG")
+    return base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+
+def open_image_for_processing(file_path, max_side=1024):
+    if file_path.lower().endswith('.svs'):
+        slide = OpenSlide(file_path)
+        try:
+            img_pil = slide.get_thumbnail((max_side, max_side)).convert("RGB")
+        finally:
+            slide.close()
+    else:
+        img_pil = Image.open(file_path).convert("RGB")
+        img_pil.thumbnail((max_side, max_side), Image.LANCZOS)
+    return img_pil
+
+
+def preview_single_file(file_path, preview_size=768):
+    """
+    Fast preview path: generates original + fibrosis mask on downsampled image.
+    """
+    try:
+        img_pil = open_image_for_processing(file_path, max_side=preview_size)
+        img_np = np.array(img_pil)
+        filtered_pil, total_pixels, ratio = fibrosis_filter(img_np)
+
+        return {
+            "status": "success",
+            "is_preview": True,
+            "original_image": f"data:image/jpeg;base64,{pil_to_b64(img_pil)}",
+            "filtered_image": f"data:image/jpeg;base64,{pil_to_b64(filtered_pil)}",
+            "fibrosis_ratio": float(ratio),
+        }
+    except Exception as e:
+        print(f"Error in preview: {e}")
+        return {"status": "error", "message": str(e)}
+
+def analyze_single_file(file_path):
+    """
+    Called by main.py. Opens the image, runs the AI, returns base64 images to frontend.
+    """
+    try:
+        # 1. Open the image
+        img_pil = open_image_for_processing(file_path, max_side=1024)
+
+        # 2. Run your existing Fibrosis Filter
+        # Note: We convert PIL -> Numpy for your filter
+        img_np = np.array(img_pil)
+        # Your fibrosis_filter returns: (result_pil, total_pixels, ratio)
+        filtered_pil, total_pixels, ratio = fibrosis_filter(img_np)
+
+        # 3. Run your existing Cluster Prediction
+        # We use the filtered image for prediction
+        u, cluster_label, _ = predict_cluster_pil(filtered_pil, already_filtered=True)
+        
+        # Handle the label lookup safely
+        label_idx = cluster_label.item()
+        label_text = cluster_lookup_table.get(label_idx, f"Unknown Cluster {label_idx}")
+        membership_scores = {
+            membership_column_names[0]: float(u[0][0]),
+            membership_column_names[1]: float(u[1][0]),
+            membership_column_names[2]: float(u[2][0]),
+            membership_column_names[3]: float(u[3][0]),
+        }
+
+        return {
+            "status": "success",
+            "original_image": f"data:image/jpeg;base64,{pil_to_b64(img_pil)}",
+            "filtered_image": f"data:image/jpeg;base64,{pil_to_b64(filtered_pil)}",
+            "fibrosis_ratio": float(ratio),
+            "cluster_label": label_text,
+            "membership_scores": membership_scores,
+            "None": membership_scores["None"],
+            "Perisinusoidal": membership_scores["Perisinusoidal"],
+            "Bridging": membership_scores["Bridging"],
+            "Cirrosis": membership_scores["Cirrosis"],
+        }
+    except Exception as e:
+        print(f"Error in analysis: {e}")
+        return {"status": "error", "message": str(e)}
 
 # ------------
 image_folder = './data/kidney'

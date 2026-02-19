@@ -6,11 +6,15 @@
 # python -m pip install -r ./setup.txt
 # flask --app .\NAFLD\src\py-src\main.py run
 import os
-from flask import Flask,jsonify,send_file, request
+from flask import Flask,jsonify,send_file, request, Response
 from datetime import datetime
 from flask_cors import CORS
 import sys
 import zipfile
+import io
+import csv
+from werkzeug.utils import secure_filename
+from nafld import analyze_single_file, preview_single_file
 
 # sys.path.append("C:\\Projects\\Machine Learning\\NAFLD\\NAFLD-project\\NAFLD\\src\\py-src\\nafld.py")
 from nafld import process_all_images
@@ -18,14 +22,100 @@ app = Flask(__name__)
 CORS(app, expose_headers=['Content-Disposition'])
 # 'C:\\Projects\\NAFLD\\NAFLD-project\\NAFLD\\Images'
 # C:\Projects\Machine Learning\NAFLD\NAFLD-project\NAFLD\Images
-UPLOAD_FOLDER = 'C:\\Projects\\Machine Learning\\NAFLD\\NAFLD-project\\NAFLD\\Images'
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
+UPLOAD_FOLDER = 'C:\\Users\\alexg\\Documents\\NAFLDimages'
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'bmp', 'tif', 'tiff', 'svs'}
+
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 upload_file_dict = {}
 # upload_file_list = []
 
 # Look into restricting access from other endpoints than arent localhost?
 # CORS(app, resources={r"/home": {"origins": "localhost:3000"}})
+
+@app.route("/analyze/<filename>", methods=['GET'])
+def analyze_file(filename):
+    print(f"Analyzing {filename}...")
+
+    file_path = resolve_uploaded_file_path(filename)
+
+    if not file_path:
+        return jsonify({'error': 'File not found'}), 404
+
+    # 2. Call the brain
+    result = analyze_single_file(file_path)
+
+    return jsonify(result), 200
+
+
+@app.route("/preview/<filename>", methods=['GET'])
+def preview_file(filename):
+    print(f"Previewing {filename}...")
+
+    file_path = resolve_uploaded_file_path(filename)
+
+    if not file_path:
+        return jsonify({'error': 'File not found'}), 404
+
+    result = preview_single_file(file_path)
+    return jsonify(result), 200
+
+
+@app.route("/download-single/<filename>", methods=['GET'])
+def download_single_file_csv(filename):
+    file_path = resolve_uploaded_file_path(filename)
+    if not file_path:
+        return jsonify({'error': 'File not found'}), 404
+
+    result = analyze_single_file(file_path)
+    if result.get('status') != 'success':
+        return jsonify({'error': result.get('message', 'Analysis failed')}), 500
+
+    membership_scores = result.get('membership_scores') or {}
+
+    csv_buffer = io.StringIO()
+    writer = csv.writer(csv_buffer)
+    writer.writerow(['image_name', 'percentage', 'cluster_label', 'None', 'Perisinusoidal', 'Bridging', 'Cirrosis'])
+    writer.writerow([
+        os.path.basename(file_path),
+        result.get('fibrosis_ratio', ''),
+        result.get('cluster_label', ''),
+        membership_scores.get('None', result.get('None', '')),
+        membership_scores.get('Perisinusoidal', result.get('Perisinusoidal', '')),
+        membership_scores.get('Bridging', result.get('Bridging', '')),
+        membership_scores.get('Cirrosis', result.get('Cirrosis', '')),
+    ])
+
+    download_name = f"result_{os.path.basename(file_path)}.csv"
+    response = Response(csv_buffer.getvalue(), mimetype='text/csv')
+    response.headers['Content-Disposition'] = f'attachment; filename="{download_name}"'
+    return response
+
+
+def resolve_uploaded_file_path(filename):
+
+    # 1. Find the file
+    # Check if it's in the dict (from your upload logic) or just in the folder
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    if not os.path.exists(file_path) and filename in upload_file_dict:
+        # Logic for folders/zips if you kept that structure
+        folder = upload_file_dict[filename]
+        file_path = os.path.join(folder, filename)
+    elif not os.path.exists(file_path):
+        # Fallback to simple lookup in UPLOAD_FOLDER
+        # Note: Your upload adds a timestamp like _34:12 to filenames. 
+        # For simplicity in testing, we might need to exact match.
+        # Let's assume for now you are testing with a file you just put there manually 
+        # or the upload logic is simplified.
+        for f in os.listdir(UPLOAD_FOLDER):
+            if f.startswith(filename):
+                file_path = os.path.join(UPLOAD_FOLDER, f)
+                break
+
+    if not os.path.exists(file_path):
+        return None
+
+    return file_path
 
 @app.route("/home")
 def home():
@@ -49,14 +139,29 @@ def home():
 
 @app.route("/upload", methods =['POST'])
 def upload_file():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file part in request'}), 400
+
     file = request.files['file']
     print(f'received: {file}')
-    if file:
-        print(f'{file.filename}_{datetime.now().minute}:{datetime.now().second}')
-        file.save(os.path.join(UPLOAD_FOLDER, f'{file.filename}_{datetime.now().minute}_{datetime.now().second}'))
-        return jsonify({'message': 'File successfully uploaded'}), 200
+    if not file or file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
 
-    return jsonify({'error': 'WHY NO WORK :( '}), 400
+    if not allowed_file(file.filename):
+        return jsonify({'error': f'Unsupported file type. Allowed: {sorted(ALLOWED_EXTENSIONS)}'}), 400
+
+    original_filename = secure_filename(file.filename)
+    root, ext = os.path.splitext(original_filename)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    safe_filename = f"{root}_{timestamp}{ext.lower()}"
+
+    save_path = os.path.join(UPLOAD_FOLDER, safe_filename)
+    file.save(save_path)
+
+    return jsonify({
+        'message': 'File successfully uploaded',
+        'filename': safe_filename
+    }), 200
 
 @app.route("/largefile", methods =['POST'])
 def upload_largefile():
@@ -72,10 +177,10 @@ def upload_largefile():
     try:
         with open(full_file_path,'ab') as chunked_file:
             chunked_file.write(chunk.read())
-    except:
-        jsonify({"status": "Error writing chunk to file"}), 400
+    except Exception:
+        return jsonify({"status": "Error writing chunk to file"}), 400
     
-    if(resumable_chunk_number == total_chunks):
+    if int(resumable_chunk_number) == total_chunks:
         return jsonify({"status": "File upload complete"}), 200
 
     #                 final_file.write(chunk_file.read())
@@ -184,8 +289,8 @@ def full_file_upload():
     try:
         with open(full_file_path,'ab') as chunked_file:
             chunked_file.write(chunk.read())
-    except:
-        jsonify({"status": "Error writing chunk to file"}), 400
+    except Exception:
+        return jsonify({"status": "Error writing chunk to file"}), 400
     
     if(int(resumable_chunk_number) == total_chunks):
         print("Returned file")
