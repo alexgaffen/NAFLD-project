@@ -35,6 +35,11 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 upload_file_dict = {}
 # upload_file_list = []
 
+# Cache analysis results so CSV download doesn't re-run the full pipeline.
+# Keyed by resolved file path → result dict.
+# Invalidated whenever a new file is uploaded.
+_analysis_cache = {}
+
 # Look into restricting access from other endpoints than arent localhost?
 # CORS(app, resources={r"/home": {"origins": "localhost:3000"}})
 
@@ -49,6 +54,9 @@ def analyze_file(filename):
 
     # 2. Call the brain
     result = analyze_single_file(file_path)
+
+    # Cache the result so CSV download can reuse it
+    _analysis_cache[file_path] = result
 
     return jsonify(result), 200
 
@@ -91,6 +99,7 @@ def analyze_file_stream(filename):
 
     def worker():
         result_holder[0] = analyze_single_file_patched(file_path, progress_callback=on_progress)
+        _analysis_cache[file_path] = result_holder[0]  # cache for CSV download
         progress_queue.put({'type': 'done'})
 
     t = threading.Thread(target=worker, daemon=True)
@@ -131,7 +140,11 @@ def download_single_file_csv(filename):
     if not file_path:
         return jsonify({'error': 'File not found'}), 404
 
-    result = analyze_single_file(file_path)
+    # Use cached result if available, otherwise run analysis
+    result = _analysis_cache.get(file_path)
+    if result is None:
+        result = analyze_single_file(file_path)
+        _analysis_cache[file_path] = result
     if result.get('status') != 'success':
         return jsonify({'error': result.get('message', 'Analysis failed')}), 500
 
@@ -222,6 +235,9 @@ def upload_file():
     save_path = os.path.join(UPLOAD_FOLDER, safe_filename)
     file.save(save_path)
 
+    # Clear analysis cache — new image uploaded
+    _analysis_cache.clear()
+
     return jsonify({
         'message': 'File successfully uploaded',
         'filename': safe_filename
@@ -259,6 +275,8 @@ def upload_largefile():
     if resumable_chunk_number == total_chunks:
         # Clean up tracking dict
         _chunked_upload_names.pop(resumable_filename, None)
+        # Clear analysis cache — new image uploaded
+        _analysis_cache.clear()
         return jsonify({
             "status": "File upload complete",
             "filename": safe_name

@@ -169,7 +169,8 @@ const ImageSubmission = () => {
         }
     };
 
-    const fibrosisRatio = displayedResult?.fibrosis_ratio;
+    // Only show extent after full analysis — preview images still appear immediately
+    const fibrosisRatio = analysisResult?.fibrosis_ratio;
     // Simple statuses for the UI label
     const pipelineStatus = isAnalyzing
         ? 'Running Diagnosis…'
