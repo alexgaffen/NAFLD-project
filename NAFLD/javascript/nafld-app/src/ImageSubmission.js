@@ -228,8 +228,8 @@ const ImageSubmission = () => {
                             )
                         ) : (
                             <div className="placeholder-text">
-                                <div>Click or Drop to Upload</div>
-                                <div style={{ fontSize: '0.7rem', opacity: 0.5, marginTop: '0.4rem' }}>SVS / TIF — any size &nbsp;·&nbsp; JPG / PNG / BMP — max 50 MB</div>
+                                <div style={{ color: '#ffffff' }}>Click or Drop to Upload</div>
+                                <div style={{ fontSize: '0.7rem', opacity: 0.7, marginTop: '0.4rem', color: '#ffffff' }}>SVS / TIF — any size &nbsp;·&nbsp; JPG / PNG / BMP — max 50 MB</div>
                             </div>
                         )}
                         <input
