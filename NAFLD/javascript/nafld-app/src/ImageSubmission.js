@@ -60,8 +60,18 @@ const ImageSubmission = () => {
         return data.filename;
     };
 
+    const MAX_FLAT_IMAGE_SIZE = 50 * 1024 * 1024; // 50 MB for JPG/PNG/BMP
+
     const handleFile = useCallback(async (file) => {
         if (!file) return;
+
+        // Enforce 50MB limit on standard flat images — large slides must use SVS or TIF
+        const isFlatImage = file.name.match(/\.(jpe?g|png|bmp)$/i);
+        if (isFlatImage && file.size > MAX_FLAT_IMAGE_SIZE) {
+            setErrorMessage(`Standard images (JPG/PNG/BMP) must be under 50 MB. For whole-slide images, use SVS or TIF format.`);
+            return;
+        }
+
         setSelectedImage(file);
         setErrorMessage("");
         setPreviewResult(null);
@@ -217,7 +227,10 @@ const ImageSubmission = () => {
                                 />
                             )
                         ) : (
-                            <div className="placeholder-text">Click or Drop to Upload</div>
+                            <div className="placeholder-text">
+                                <div>Click or Drop to Upload</div>
+                                <div style={{ fontSize: '0.7rem', opacity: 0.5, marginTop: '0.4rem' }}>SVS / TIF — any size &nbsp;·&nbsp; JPG / PNG / BMP — max 50 MB</div>
+                            </div>
                         )}
                         <input
                             ref={fileInputRef}

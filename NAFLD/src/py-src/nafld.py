@@ -559,6 +559,14 @@ def analyze_single_file(file_path):
     # ── Fast thumbnail path for small images ──
     print(f"[analyze] Using THUMBNAIL pipeline for {os.path.basename(file_path)}")
     try:
+        # Guard against oversized flat images that would exhaust RAM
+        MAX_FLAT_BYTES = 50 * 1024 * 1024  # 50 MB
+        if os.path.getsize(file_path) > MAX_FLAT_BYTES:
+            return {
+                "status": "error",
+                "message": "File too large for standard image analysis (max 50 MB). Use SVS or TIF format for whole-slide images."
+            }
+
         # 1. Open the image
         img_pil = open_image_for_processing(file_path, max_side=1024)
 
