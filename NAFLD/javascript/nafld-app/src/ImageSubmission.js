@@ -79,21 +79,20 @@ const ImageSubmission = () => {
 
             setUploadedFilename(filename);
 
-            // Fetch preview immediately
-            const previewResponse = await fetch(`http://127.0.0.1:5000/preview/${encodeURIComponent(filename)}`);
-            if (previewResponse.ok) {
-                setPreviewResult(await previewResponse.json());
-            }
-
-            // Trigger analysis — use SSE stream for real-time patch progress
-            setIsUploading(false);
-            setIsAnalyzing(true);
-            setPatchProgress(null);
-
             const isSvsTif = file.name.match(/\.(svs|tif|tiff)$/i);
 
             if (isSvsTif) {
+                // Large slides: fetch a quick preview so the user sees something while patches process
+                const previewResponse = await fetch(`http://127.0.0.1:5000/preview/${encodeURIComponent(filename)}`);
+                if (previewResponse.ok) {
+                    setPreviewResult(await previewResponse.json());
+                }
+
                 // Stream patch progress via SSE
+                setIsUploading(false);
+                setIsAnalyzing(true);
+                setPatchProgress(null);
+
                 const analyzeResult = await new Promise((resolve, reject) => {
                     const evtSource = new EventSource(`http://127.0.0.1:5000/analyze-stream/${encodeURIComponent(filename)}`);
                     evtSource.onmessage = (event) => {
@@ -117,9 +116,16 @@ const ImageSubmission = () => {
                 });
                 setAnalysisResult(analyzeResult);
             } else {
+                // Small images (JPG/PNG/BMP): skip preview, single analysis call returns everything
+                setIsUploading(false);
+                setIsAnalyzing(true);
+                setPatchProgress(null);
+
                 const analyzeResponse = await fetch(`http://127.0.0.1:5000/analyze/${encodeURIComponent(filename)}`);
                 if (!analyzeResponse.ok) throw new Error(`Analyze failed: ${await analyzeResponse.text()}`);
-                setAnalysisResult(await analyzeResponse.json());
+                const result = await analyzeResponse.json();
+                setPreviewResult(result);    // Images appear via displayedResult
+                setAnalysisResult(result);   // Extent + classification ready simultaneously
             }
         } catch (error) {
             console.error("Pipeline error:", error);
