@@ -185,6 +185,17 @@ const ImageSubmission = () => {
         }
     };
 
+    const handleDownloadMask = () => {
+        if (!displayedResult?.filtered_image) return;
+        const link = document.createElement('a');
+        link.href = displayedResult.filtered_image;
+        const baseName = image?.name ? image.name.replace(/\.[^.]+$/, '') : 'fibrosis';
+        link.setAttribute('download', `${baseName}_mask.jpg`);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+    };
+
     // Only show extent after full analysis — preview images still appear immediately
     const fibrosisRatio = analysisResult?.fibrosis_ratio;
     // Simple statuses for the UI label
@@ -211,7 +222,7 @@ const ImageSubmission = () => {
                     >
                         <span className="img-label">Original PSR Staining</span>
                         {displayedResult?.original_image ? (
-                            <img alt="Original PSR" src={displayedResult.original_image} className="preview-image" />
+                            <img alt="Original PSR" src={displayedResult.original_image} className="preview-image" draggable="false" onDragStart={(e) => e.preventDefault()} />
                         ) : image ? (
                             image.name.match(/\.(tif|tiff|svs)$/i) ? (
                                 <div className="placeholder-text" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', alignItems: 'center' }}>
@@ -223,7 +234,9 @@ const ImageSubmission = () => {
                                 <img 
                                     alt="Selected" 
                                     src={URL.createObjectURL(image)} 
-                                    className="preview-image" 
+                                    className="preview-image"
+                                    draggable="false"
+                                    onDragStart={(e) => e.preventDefault()}
                                 />
                             )
                         ) : (
@@ -245,9 +258,14 @@ const ImageSubmission = () => {
                     <div className="img-panel">
                         <span className="img-label accent">AI Fibrosis Mask</span>
                         {displayedResult?.filtered_image ? (
-                            <img alt="Fibrosis mask" src={displayedResult.filtered_image} className="preview-image" />
+                            <img alt="Fibrosis mask" src={displayedResult.filtered_image} className="preview-image" draggable="false" onDragStart={(e) => e.preventDefault()} />
                         ) : (
                             <div className="placeholder-text">Fibrosis mask appears after analysis</div>
+                        )}
+                        {displayedResult?.filtered_image && (
+                            <button className="download-mask-btn" onClick={handleDownloadMask} title="Download fibrosis mask">
+                                ⬇ Save Mask
+                            </button>
                         )}
                     </div>
                 </div>
@@ -322,6 +340,29 @@ const ImageSubmission = () => {
                     </p>
                 </div>
 
+                {/* Membership probability breakdown */}
+                {analysisResult && (analysisResult.None !== undefined) && (
+                    <div className="report-card">
+                        <p className="report-label">FCM Membership Probabilities</p>
+                        {[
+                            { label: 'None', value: analysisResult.None, color: '#4ecdc4' },
+                            { label: 'Perisinusoidal', value: analysisResult.Perisinusoidal, color: '#f7b731' },
+                            { label: 'Bridging', value: analysisResult.Bridging, color: '#fc5c65' },
+                            { label: 'Cirrosis', value: analysisResult.Cirrosis, color: '#a55eea' },
+                        ].map(({ label, value, color }) => (
+                            <div key={label} style={{ marginBottom: '0.35rem' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: '#c5cdd5', marginBottom: '2px' }}>
+                                    <span>{label}</span>
+                                    <span>{(value * 100).toFixed(1)}%</span>
+                                </div>
+                                <div className="extent-bar-track" style={{ height: '4px' }}>
+                                    <div style={{ height: '100%', width: `${Math.min(value * 100, 100)}%`, background: color, borderRadius: '3px', transition: 'width 0.4s ease' }} />
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+
                 <div className="report-card info-card">
                     <p>
                         <strong>Visualization & Extent:</strong> White pixels indicate detected collagen fibers 
@@ -343,7 +384,7 @@ const ImageSubmission = () => {
                     onClick={handleDownloadCsv}
                     disabled={!uploadedFilename || isUploading || isAnalyzing}
                 >
-                    Download CSV
+                    Download CSV Diagnosis
                 </button>
             </aside>
         </div>

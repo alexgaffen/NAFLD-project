@@ -61,18 +61,11 @@ vgg_model=VGG16(weights='imagenet',include_top=False)
 with open(os.path.join(model_save_path,'pca_model.pkl'), 'rb') as file:
     pca_model = pickle.load(file)
 
-with open(os.path.join(model_save_path, 'model_params.pkl'), 'rb') as file:
+with open(os.path.join(model_save_path, 'fixed_model_params.pkl'), 'rb') as file:
     model_params = pickle.load(file)
 
 centroids = model_params['centroids']
-
-# u = model_params['u']
-# u0 = model_params['u0']
-# d = model_params['d']
-# jm = model_params['jm']
-# p = model_params['p']
-# fpc = model_params['fpc']
-best_m = model_params.get('best_m', 1.5) # Default to 1.5 if missing
+best_m = model_params.get('best_m', 1.15)  # K-Means-initialized FCM with strict fuzziness
 #8f7972 -> 143,121,114
 # 0.560,0.474,0.447
 
@@ -112,23 +105,145 @@ def extract_features(pil_img):
     predictions = predictions.flatten()
     return predictions
 
+def _find_threshold_by_descent(red_stain, tissue_mask, num_steps=100, jump_factor=2.0):
+    """
+    Descending threshold sweep with jump detection.
+
+    Treats the red-stain channel as a topographical map. Starts at the
+    ceiling (max red value) and steps the threshold downward. At each
+    step, measures the extent (% tissue pixels selected). When the
+    rate of change in extent jumps significantly (> jump_factor times
+    the running average rate), we've crossed from true collagen into
+    brown parenchyma — so we snap back to the threshold just before
+    the jump.
+
+    Uses a pre-sorted array + searchsorted so each step is O(log n)
+    instead of O(n), giving O(n log n) total (dominated by the sort).
+
+    Parameters
+    ----------
+    red_stain   : 2D array of red-stain deconvolution values
+    tissue_mask : boolean 2D array (True = tissue pixel)
+    num_steps   : how many threshold levels to test between max and min
+    jump_factor : a jump is detected when the rate exceeds this many
+                  times the running average rate
+
+    Returns
+    -------
+    float : the chosen threshold
+    """
+    tissue_vals = red_stain[tissue_mask]
+    if tissue_vals.size < 200:
+        return 2.4  # fallback
+
+    ceiling = float(np.percentile(tissue_vals, 99.5))  # ignore extreme outliers
+    floor   = float(np.percentile(tissue_vals, 5))      # don't go below 5th pctl
+    if ceiling - floor < 0.05:
+        return 2.4
+
+    # Sort once — extent lookups become O(log n) via searchsorted
+    sorted_vals = np.sort(tissue_vals)
+    n = sorted_vals.size
+    step_size = (ceiling - floor) / num_steps
+
+    prev_extent = 0.0
+    rates = []          # extent increase per step
+    thresholds = []     # threshold at each step
+
+    # Sweep from ceiling downward
+    for i in range(num_steps + 1):
+        t = ceiling - i * step_size
+        # O(log n) instead of O(n)
+        idx = np.searchsorted(sorted_vals, t, side='right')
+        extent = (n - idx) / n * 100.0
+        rate = extent - prev_extent
+
+        thresholds.append(t)
+        rates.append(rate)
+        prev_extent = extent
+
+    # Find the jump: where rate suddenly spikes relative to running avg
+    # Skip the first few steps (often noisy at the very top)
+    min_steps = 5
+    best_thresh = floor  # default to floor if no jump found
+
+    for i in range(min_steps, len(rates)):
+        # Running average of rates so far (excluding current)
+        avg_rate = np.mean(rates[min_steps:i]) if i > min_steps else rates[i]
+        if avg_rate < 1e-6:
+            continue
+
+        if rates[i] > jump_factor * avg_rate and rates[i] > 0.5:
+            # Jump detected — use the threshold from one step before
+            best_thresh = thresholds[max(i - 1, 0)]
+            print(f"[Threshold] Jump at step {i}: rate={rates[i]:.2f}% vs avg={avg_rate:.2f}% -> thresh={best_thresh:.3f}")
+            break
+    else:
+        # No clear jump found — use the point where rate is highest
+        # (the biggest single-step increase = boundary between red & brown)
+        peak_idx = np.argmax(rates[min_steps:]) + min_steps
+        best_thresh = thresholds[max(peak_idx - 1, 0)]
+        print(f"[Threshold] No jump, using peak-rate at step {peak_idx}: thresh={best_thresh:.3f}")
+
+    print(f"[Threshold] Sweep: ceiling={ceiling:.2f}  floor={floor:.2f}  chosen={best_thresh:.3f}")
+    return best_thresh
+
+
 def fibrosis_filter(window, stain_matrix=None):
     if stain_matrix is None:
         stain_matrix = globals()['stain_matrix']
 
     img_array = np.array(window)
-    img_float = img_array.astype(np.float32) / 255.0
+
+    # ── Brightness normalization ───────────────────────────────
+    # Stretch tissue pixel intensities to a consistent range so
+    # that brighter/darker exposures produce the same OD values.
+    # Target: tissue median ≈ 160  (typical well-lit PSR slide)
+    tissue_px = img_array[(img_array.sum(axis=-1) > 50) & (np.mean(img_array, axis=2) < 240)]
+    if tissue_px.size > 0:
+        current_median = float(np.median(tissue_px))
+        if current_median > 10:  # avoid division by near-zero
+            target_median = 160.0
+            scale = target_median / current_median
+            img_norm = np.clip(img_array.astype(np.float32) * scale, 0, 255).astype(np.uint8)
+            print(f"[Brightness] median {current_median:.0f} -> scaled by {scale:.2f}")
+        else:
+            img_norm = img_array
+    else:
+        img_norm = img_array
+
+    img_float = img_norm.astype(np.float32) / 255.0
     #perform color deconv
     stains = np.dot(-np.log(img_float + np.finfo(float).eps), stain_matrix.T)
     #Select the stain for red regions
     red_stain = stains[:, :, 0]
 
-    hsv_img = cv2.cvtColor(img_array, cv2.COLOR_RGB2HSV)
-    mask = (red_stain > 2.4) & (img_array.sum(axis=-1) > 50)
+    # Tissue mask: exclude white background and very dark pixels (on normalized image)
+    tissue_mask = (img_norm.sum(axis=-1) > 50) & (np.mean(img_norm, axis=2) < 220)
+
+    # Descending threshold sweep — finds where red collagen ends
+    # and brown parenchyma begins
+    thresh = _find_threshold_by_descent(red_stain, tissue_mask)
+
+    mask = (red_stain > thresh) & tissue_mask
     mask = mask.astype(np.uint8) * 255
+
+    # ── Morphological opening ──────────────────────────────────
+    # Remove isolated small clusters of pixels (noise / faint staining
+    # of portal structures).  A 3×3 elliptical kernel removes objects
+    # smaller than ~3 px across, matching QuPath's behaviour of only
+    # counting contiguous collagen regions.
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
     total_selected_pixels = np.sum(mask == 255)
-    total_pixels = mask.size
-    selected_ratio = (total_selected_pixels / total_pixels) * 100
+    # Use tissue pixels (not total pixels) as denominator so white
+    # background doesn't dilute the extent calculation.
+    tissue_pixel_count = int(np.sum(tissue_mask))
+    if tissue_pixel_count > 0:
+        selected_ratio = (total_selected_pixels / tissue_pixel_count) * 100
+    else:
+        selected_ratio = 0.0
 
     result_image = np.zeros_like(img_array)
     result_image[mask == 255] = [255, 255, 255]
@@ -357,7 +472,7 @@ from io import BytesIO
 
 def pil_to_b64(img):
     buffered = BytesIO()
-    img.save(buffered, format="JPEG")
+    img.save(buffered, format="JPEG", quality=95)
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
 
@@ -449,6 +564,10 @@ def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=40
         total_fibrosis_pixels = 0
         patch_count = 0
 
+        # Per-patch classification accumulators
+        patch_votes = []            # list of cluster indices (0-3)
+        patch_memberships = []      # list of membership arrays (4,)
+
         # Count total candidate tiles for progress reporting
         rows = list(range(0, h, patch_size))
         cols = list(range(0, w, patch_size))
@@ -476,6 +595,18 @@ def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=40
                 full_mask[py:py + ph, px:px + pw_actual] = mask_np
                 total_tissue_pixels += ph * pw_actual
                 total_fibrosis_pixels += selected_px
+
+                # ── Per-patch VGG16 classification ──
+                patch_pil = Image.fromarray(patch)
+                try:
+                    patch_u, patch_cl, _ = predict_cluster_pil(
+                        mask_pil, already_filtered=True, original_pil=patch_pil
+                    )
+                    patch_votes.append(patch_cl.item())
+                    patch_memberships.append([float(patch_u[i][0]) for i in range(4)])
+                except Exception as e:
+                    print(f"[Patch] Classification failed on patch ({py},{px}): {e}")
+
                 patch_count += 1
 
                 if progress_callback:
@@ -484,22 +615,60 @@ def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=40
         overall_ratio = (total_fibrosis_pixels / total_tissue_pixels * 100) if total_tissue_pixels > 0 else 0.0
         print(f"[Patch] {patch_count} tissue patches — fibrosis {overall_ratio:.2f}%")
 
-        # ── Classification on thumbnail (model-compatible) ──
-        thumb_np = np.array(thumb_pil)
-        thumb_filtered, _, _ = fibrosis_filter(thumb_np)
-        u, cluster_label, _ = predict_cluster_pil(thumb_filtered, already_filtered=True, original_pil=thumb_pil)
+        # ── Worst-class voting with 20% quorum ──
+        # Severity order: 3 (Cirrhosis) > 2 (Bridging) > 1 (Perisinusoidal) > 0 (None)
+        # Take the most severe class that at least 20% of patches voted for.
+        VOTE_QUORUM = 0.20
+        if patch_votes:
+            vote_counts = {}
+            for v in patch_votes:
+                vote_counts[v] = vote_counts.get(v, 0) + 1
+            n_patches = len(patch_votes)
+
+            # Walk from most severe (3) down to least (0)
+            final_label = 0
+            for severity in [3, 2, 1, 0]:
+                fraction = vote_counts.get(severity, 0) / n_patches
+                if fraction >= VOTE_QUORUM:
+                    final_label = severity
+                    break
+
+            # Average memberships across all patches
+            avg_memberships = np.mean(patch_memberships, axis=0)
+
+            vote_summary = {cluster_lookup_table.get(k, k): f"{v}/{n_patches} ({v/n_patches*100:.0f}%)"
+                           for k, v in sorted(vote_counts.items())}
+            print(f"[Patch] Votes: {vote_summary}")
+            print(f"[Patch] Final class (worst with ≥{VOTE_QUORUM*100:.0f}%): {cluster_lookup_table.get(final_label)}")
+
+            # Build vote breakdown for the frontend
+            vote_breakdown = {
+                membership_column_names[i]: {
+                    "count": vote_counts.get(i, 0),
+                    "total": n_patches,
+                    "pct": round(vote_counts.get(i, 0) / n_patches * 100, 1)
+                } for i in range(4)
+            }
+        else:
+            # No patches classified — fall back to thumbnail
+            print("[Patch] No patch votes, falling back to thumbnail classification")
+            thumb_np = np.array(thumb_pil)
+            thumb_filtered, _, _ = fibrosis_filter(thumb_np)
+            u_fb, cl_fb, _ = predict_cluster_pil(thumb_filtered, already_filtered=True, original_pil=thumb_pil)
+            final_label = cl_fb.item()
+            avg_memberships = np.array([float(u_fb[i][0]) for i in range(4)])
+            vote_breakdown = None
 
         # ── Resize for frontend display ──
         display_orig = Image.fromarray(full_image)
-        display_orig.thumbnail((1024, 1024), Image.LANCZOS)
+        display_orig.thumbnail((2048, 2048), Image.LANCZOS)
 
         display_mask = Image.fromarray(full_mask)
-        display_mask.thumbnail((1024, 1024), Image.LANCZOS)
+        display_mask.thumbnail((2048, 2048), Image.LANCZOS)
 
-        label_idx = cluster_label.item()
-        label_text = cluster_lookup_table.get(label_idx, f"Unknown Cluster {label_idx}")
+        label_text = cluster_lookup_table.get(final_label, f"Unknown Cluster {final_label}")
         membership_scores = {
-            membership_column_names[i]: float(u[i][0]) for i in range(4)
+            membership_column_names[i]: float(avg_memberships[i]) for i in range(4)
         }
 
         return {
@@ -510,6 +679,7 @@ def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=40
             "cluster_label": label_text,
             "membership_scores": membership_scores,
             "patch_count": patch_count,
+            "vote_breakdown": vote_breakdown,
             "None": membership_scores["None"],
             "Perisinusoidal": membership_scores["Perisinusoidal"],
             "Bridging": membership_scores["Bridging"],
@@ -521,7 +691,7 @@ def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=40
         return {"status": "error", "message": str(e)}
 
 
-def preview_single_file(file_path, preview_size=768):
+def preview_single_file(file_path, preview_size=1536):
     """
     Fast preview path: generates original + fibrosis mask on downsampled image.
     """
@@ -568,7 +738,7 @@ def analyze_single_file(file_path):
             }
 
         # 1. Open the image
-        img_pil = open_image_for_processing(file_path, max_side=1024)
+        img_pil = open_image_for_processing(file_path, max_side=2048)
 
         # 2. Run your existing Fibrosis Filter
         # Note: We convert PIL -> Numpy for your filter

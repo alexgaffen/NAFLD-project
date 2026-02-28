@@ -122,10 +122,33 @@ html, body, #root {
 }
 .img-label.accent { color: #4ecdc4; border: 1px solid #4ecdc4; }
 
+.download-mask-btn {
+  position: absolute;
+  bottom: 0.5rem;
+  right: 0.5rem;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid #3a4f63;
+  border-radius: 0.35rem;
+  background: rgba(15, 25, 35, 0.85);
+  color: #c5cdd5;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  z-index: 2;
+  transition: background 0.2s, border-color 0.2s;
+}
+.download-mask-btn:hover {
+  background: #253545;
+  border-color: #4ecdc4;
+  color: #4ecdc4;
+}
+
 .preview-image {
   width: 100%;
   height: 100%;
   object-fit: contain;
+  -webkit-user-drag: none;
+  user-select: none;
 }
 
 .placeholder-text {
@@ -205,15 +228,17 @@ html, body, #root {
   margin-bottom: 0.25rem;
 }
 .report-value {
-  font-size: 2rem;
+  font-size: 1.5rem;
   font-weight: 700;
   color: #fff;
   line-height: 1.15;
+  text-align: right;
 }
 .report-class {
   font-size: 1.05rem;
   font-weight: 700;
   color: #4ecdc4;
+  text-align: right;
 }
 
 /* Extent bar */
