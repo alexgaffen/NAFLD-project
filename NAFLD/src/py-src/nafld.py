@@ -36,6 +36,7 @@ from tensorflow.keras import layers
 import tensorflow as tf
 
 #from tqdm import tqdm
+import gc
 import cv2
 from PIL import Image
 import ipywidgets as widgets
@@ -250,7 +251,7 @@ def fibrosis_filter(window, stain_matrix=None):
 
     result_image_pil = Image.fromarray(result_image)
 
-    return result_image_pil, total_selected_pixels, selected_ratio
+    return result_image_pil, total_selected_pixels, selected_ratio, tissue_pixel_count
 
 def predict_cluster_pil(pil_image, already_filtered=False, original_pil=None):
     """
@@ -271,7 +272,7 @@ def predict_cluster_pil(pil_image, already_filtered=False, original_pil=None):
     if already_filtered:
         percentage = None
     else:
-        _, _, percentage = fibrosis_filter(image)
+        _, _, percentage, _ = fibrosis_filter(image)
 
     # VGG16 must see the original RGB tissue, NOT the B&W mask
     feature_source = original_pil if original_pil is not None else pil_image
@@ -300,7 +301,7 @@ def update_filter_slide_legacy(change):
     region = slide.read_region((x, y), level, (window_width, window_height))
     region = region.convert("RGB")  # Convert to RGB
 
-    result_image_pil, total_selected_pixels, selected_ratio = fibrosis_filter(region)
+    result_image_pil, total_selected_pixels, selected_ratio, _ = fibrosis_filter(region)
     u, cluster_label, _ = predict_cluster_pil(result_image_pil, already_filtered=True, original_pil=region)
 
     with output:
@@ -334,7 +335,7 @@ def update_filter_slide(image_folder,file,level_slider,x_slider,y_slider,window_
     region = slide.read_region((x, y), level, (window_width, window_height))
     region = region.convert("RGB")  # Convert to RGB
 
-    result_image_pil, total_selected_pixels, selected_ratio = fibrosis_filter(region)
+    result_image_pil, total_selected_pixels, selected_ratio, _ = fibrosis_filter(region)
     u, cluster_label, _ = predict_cluster_pil(result_image_pil, already_filtered=True, original_pil=region)
 
     output = widgets.Output()
@@ -370,7 +371,7 @@ def update_filter_image(change):
     original_image = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
     output = widgets.Output()
     original_pil = Image.fromarray(original_image)
-    result_image_pil, total_selected_pixels, selected_ratio = fibrosis_filter(original_image)
+    result_image_pil, total_selected_pixels, selected_ratio, _ = fibrosis_filter(original_image)
     u, cluster_label, _ = predict_cluster_pil(result_image_pil, already_filtered=True, original_pil=original_pil)
     with output:
         output.clear_output(wait=True)
@@ -402,7 +403,7 @@ def predict_cluster(image_path, stain_matrix=None):
 
     image = cv2.imread(image_path)
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    img, pxl, percentage = fibrosis_filter(image, stain_matrix)
+    img, pxl, percentage, _ = fibrosis_filter(image, stain_matrix)
     # Pass the original RGB image to VGG16, not the B&W mask
     original_pil = Image.fromarray(image)
     features = extract_features(original_pil)
@@ -491,10 +492,10 @@ def open_image_for_processing(file_path, max_side=1024):
 
 # ── Patch helpers ──────────────────────────────────────────────────
 
-def _is_tissue_patch(patch_np, white_thresh=220, white_frac=0.80):
-    """Return True if the patch contains real tissue, not blank slide background."""
-    gray = np.mean(patch_np, axis=2)
-    return (np.sum(gray > white_thresh) / gray.size) < white_frac
+def _is_tissue_patch(patch_np):
+    """Return True unless the patch is almost entirely white (≥95% blank)."""
+    gray = np.mean(patch_np.astype(np.float32), axis=2)
+    return (np.sum(gray > 220) / gray.size) < 0.95
 
 
 def _select_slide_level(slide, max_dim=4096):
@@ -531,10 +532,13 @@ def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=40
             level_w, level_h = slide.level_dimensions[level]
             full_pil = slide.read_region((0, 0), level, (level_w, level_h)).convert("RGB")
             full_image = np.array(full_pil)
-            
-            # Create thumbnail for classification
-            thumb_pil = slide.get_thumbnail((1024, 1024)).convert("RGB")
+            del full_pil
             slide.close()
+            try:
+                os.remove(file_path)
+                print(f"[GC] Deleted uploaded file: {file_path}")
+            except Exception:
+                pass
             print(f"[Patch] SVS opened at level {level} → {level_w}×{level_h}")
         else:
             try:
@@ -544,8 +548,13 @@ def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=40
                 level_w, level_h = slide.level_dimensions[level]
                 full_pil = slide.read_region((0, 0), level, (level_w, level_h)).convert("RGB")
                 full_image = np.array(full_pil)
-                thumb_pil = slide.get_thumbnail((1024, 1024)).convert("RGB")
+                del full_pil
                 slide.close()
+                try:
+                    os.remove(file_path)
+                    print(f"[GC] Deleted uploaded file: {file_path}")
+                except Exception:
+                    pass
                 print(f"[Patch] Large TIFF opened via OpenSlide at level {level}")
             except Exception:
                 # Fallback to Pillow if OpenSlide fails (e.g. standard TIFF without pyramid)
@@ -554,118 +563,97 @@ def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=40
                 if max(img.size) > max_processing_dim:
                     img.thumbnail((max_processing_dim, max_processing_dim), Image.LANCZOS)
                 full_image = np.array(img)
-                thumb_pil = img.copy()
-                thumb_pil.thumbnail((1024, 1024), Image.LANCZOS)
+                del img
+                try:
+                    os.remove(file_path)
+                    print(f"[GC] Deleted uploaded file: {file_path}")
+                except Exception:
+                    pass
 
         h, w = full_image.shape[:2]
-        full_mask = np.zeros((h, w, 3), dtype=np.uint8)
 
-        total_tissue_pixels = 0
-        total_fibrosis_pixels = 0
+        # Send an early preview from the SAME image being tiled so the
+        # frontend overlay aligns perfectly with the displayed image.
+        if progress_callback:
+            preview_pil = Image.fromarray(full_image)
+            preview_pil.thumbnail((2048, 2048), Image.LANCZOS)
+            progress_callback(0, 1, 0,
+                              analysis_preview=f"data:image/jpeg;base64,{pil_to_b64(preview_pil)}")
+            del preview_pil
+
+        # ── Run fibrosis_filter on the FULL image (no seams) ──
+        full_mask_pil, total_fibrosis_pixels, overall_ratio, total_tissue_pixels = fibrosis_filter(full_image)
+        full_mask = np.array(full_mask_pil)
+        del full_mask_pil
+        print(f"[Patch] Full-image fibrosis filter: {overall_ratio:.2f}%  tissue_px={total_tissue_pixels}")
+
         patch_count = 0
-
-        # Per-patch classification accumulators
-        patch_votes = []            # list of cluster indices (0-3)
         patch_memberships = []      # list of membership arrays (4,)
 
         # Count total candidate tiles for progress reporting
         rows = list(range(0, h, patch_size))
         cols = list(range(0, w, patch_size))
-        total_tiles = len(rows) * len(cols)
+        num_rows = len(rows)
+        num_cols = len(cols)
+        total_tiles = num_rows * num_cols
         current_tile = 0
 
-        # ── Tile and process ──
-        for py in rows:
-            for px in cols:
+        # ── Tile for VGG16 classification — every tile gets classified ──
+        for ri, py in enumerate(rows):
+            for ci, px in enumerate(cols):
                 current_tile += 1
                 patch = full_image[py:py + patch_size, px:px + patch_size]
                 ph, pw_actual = patch.shape[:2]
 
                 if ph < 32 or pw_actual < 32:
                     continue
-                if not _is_tissue_patch(patch):
-                    # Report progress even for skipped tiles
-                    if progress_callback:
-                        progress_callback(current_tile, total_tiles, patch_count)
-                    continue
 
-                mask_pil, selected_px, _ = fibrosis_filter(patch)
-                mask_np = np.array(mask_pil)
-
-                full_mask[py:py + ph, px:px + pw_actual] = mask_np
-                total_tissue_pixels += ph * pw_actual
-                total_fibrosis_pixels += selected_px
-
-                # ── Per-patch VGG16 classification ──
+                # Extract this tile's mask for VGG16
+                tile_mask = full_mask[py:py + ph, px:px + pw_actual]
+                tile_mask_pil = Image.fromarray(tile_mask)
                 patch_pil = Image.fromarray(patch)
                 try:
                     patch_u, patch_cl, _ = predict_cluster_pil(
-                        mask_pil, already_filtered=True, original_pil=patch_pil
+                        tile_mask_pil, already_filtered=True, original_pil=patch_pil
                     )
-                    patch_votes.append(patch_cl.item())
                     patch_memberships.append([float(patch_u[i][0]) for i in range(4)])
                 except Exception as e:
                     print(f"[Patch] Classification failed on patch ({py},{px}): {e}")
+                finally:
+                    del tile_mask_pil, patch_pil
 
                 patch_count += 1
 
+                # Free unreferenced tensors periodically
+                if patch_count % 10 == 0:
+                    gc.collect()
+
                 if progress_callback:
-                    progress_callback(current_tile, total_tiles, patch_count)
+                    progress_callback(current_tile, total_tiles, patch_count,
+                                      grid_rows=num_rows, grid_cols=num_cols,
+                                      tile_row=ri, tile_col=ci, is_tissue=True)
 
-        overall_ratio = (total_fibrosis_pixels / total_tissue_pixels * 100) if total_tissue_pixels > 0 else 0.0
-        print(f"[Patch] {patch_count} tissue patches — fibrosis {overall_ratio:.2f}%")
+        print(f"[Patch] {patch_count} tissue patches classified — fibrosis {overall_ratio:.2f}%")
 
-        # ── Worst-class voting with 20% quorum ──
-        # Severity order: 3 (Cirrhosis) > 2 (Bridging) > 1 (Perisinusoidal) > 0 (None)
-        # Take the most severe class that at least 20% of patches voted for.
-        VOTE_QUORUM = 0.20
-        if patch_votes:
-            vote_counts = {}
-            for v in patch_votes:
-                vote_counts[v] = vote_counts.get(v, 0) + 1
-            n_patches = len(patch_votes)
-
-            # Walk from most severe (3) down to least (0)
-            final_label = 0
-            for severity in [3, 2, 1, 0]:
-                fraction = vote_counts.get(severity, 0) / n_patches
-                if fraction >= VOTE_QUORUM:
-                    final_label = severity
-                    break
-
-            # Average memberships across all patches
+        # ── Average fuzzy memberships across all patches ──
+        if patch_memberships:
             avg_memberships = np.mean(patch_memberships, axis=0)
-
-            vote_summary = {cluster_lookup_table.get(k, k): f"{v}/{n_patches} ({v/n_patches*100:.0f}%)"
-                           for k, v in sorted(vote_counts.items())}
-            print(f"[Patch] Votes: {vote_summary}")
-            print(f"[Patch] Final class (worst with ≥{VOTE_QUORUM*100:.0f}%): {cluster_lookup_table.get(final_label)}")
-
-            # Build vote breakdown for the frontend
-            vote_breakdown = {
-                membership_column_names[i]: {
-                    "count": vote_counts.get(i, 0),
-                    "total": n_patches,
-                    "pct": round(vote_counts.get(i, 0) / n_patches * 100, 1)
-                } for i in range(4)
-            }
         else:
-            # No patches classified — fall back to thumbnail
-            print("[Patch] No patch votes, falling back to thumbnail classification")
-            thumb_np = np.array(thumb_pil)
-            thumb_filtered, _, _ = fibrosis_filter(thumb_np)
-            u_fb, cl_fb, _ = predict_cluster_pil(thumb_filtered, already_filtered=True, original_pil=thumb_pil)
-            final_label = cl_fb.item()
-            avg_memberships = np.array([float(u_fb[i][0]) for i in range(4)])
-            vote_breakdown = None
+            avg_memberships = np.zeros(4)
 
-        # ── Resize for frontend display ──
+        # ── Resize for frontend display, then free large arrays ──
         display_orig = Image.fromarray(full_image)
         display_orig.thumbnail((2048, 2048), Image.LANCZOS)
 
         display_mask = Image.fromarray(full_mask)
         display_mask.thumbnail((2048, 2048), Image.LANCZOS)
 
+        del full_image, full_mask
+        gc.collect()
+        print("[GC] Released full_image and full_mask")
+
+        # Derive label from highest average membership
+        final_label = int(np.argmax(avg_memberships))
         label_text = cluster_lookup_table.get(final_label, f"Unknown Cluster {final_label}")
         membership_scores = {
             membership_column_names[i]: float(avg_memberships[i]) for i in range(4)
@@ -679,7 +667,6 @@ def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=40
             "cluster_label": label_text,
             "membership_scores": membership_scores,
             "patch_count": patch_count,
-            "vote_breakdown": vote_breakdown,
             "None": membership_scores["None"],
             "Perisinusoidal": membership_scores["Perisinusoidal"],
             "Bridging": membership_scores["Bridging"],
@@ -698,7 +685,7 @@ def preview_single_file(file_path, preview_size=1536):
     try:
         img_pil = open_image_for_processing(file_path, max_side=preview_size)
         img_np = np.array(img_pil)
-        filtered_pil, total_pixels, ratio = fibrosis_filter(img_np)
+        filtered_pil, total_pixels, ratio, _ = fibrosis_filter(img_np)
 
         return {
             "status": "success",
@@ -739,12 +726,17 @@ def analyze_single_file(file_path):
 
         # 1. Open the image
         img_pil = open_image_for_processing(file_path, max_side=2048)
+        try:
+            os.remove(file_path)
+            print(f"[GC] Deleted uploaded file: {file_path}")
+        except Exception:
+            pass
 
         # 2. Run your existing Fibrosis Filter
         # Note: We convert PIL -> Numpy for your filter
         img_np = np.array(img_pil)
-        # Your fibrosis_filter returns: (result_pil, total_pixels, ratio)
-        filtered_pil, total_pixels, ratio = fibrosis_filter(img_np)
+        # Your fibrosis_filter returns: (result_pil, total_pixels, ratio, tissue_pixel_count)
+        filtered_pil, total_pixels, ratio, _ = fibrosis_filter(img_np)
 
         # 3. Run your existing Cluster Prediction
         # Pass original RGB to VGG16 for meaningful features

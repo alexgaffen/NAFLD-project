@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 
 const ImageSubmission = () => {
     const [image, setSelectedImage] = useState(null);
@@ -11,9 +11,41 @@ const ImageSubmission = () => {
     const [isDragging, setIsDragging] = useState(false);
     const [uploadProgress, setUploadProgress] = useState(0);
     const [patchProgress, setPatchProgress] = useState(null); // { current, total, tissue_patches }
+    const [tileGrid, setTileGrid] = useState(null); // { rows, cols, tiles: [0=pending|1=bg|2=tissue] }
     const fileInputRef = useRef(null);
+    const originalImgRef = useRef(null);
+    const [imgContentRect, setImgContentRect] = useState(null); // { left, top, width, height }
 
     const displayedResult = analysisResult || previewResult;
+
+    // Compute where the object-fit:contain image actually renders inside the panel
+    const computeImgRect = useCallback(() => {
+        const img = originalImgRef.current;
+        if (!img || !img.naturalWidth) return;
+        const container = img.parentElement;
+        const cw = container.clientWidth;
+        const ch = container.clientHeight;
+        const nw = img.naturalWidth;
+        const nh = img.naturalHeight;
+        const scale = Math.min(cw / nw, ch / nh);
+        const rw = nw * scale;
+        const rh = nh * scale;
+        setImgContentRect({
+            left: (cw - rw) / 2,
+            top: (ch - rh) / 2,
+            width: rw,
+            height: rh,
+        });
+    }, []);
+
+    // Recompute on resize
+    useEffect(() => {
+        const img = originalImgRef.current;
+        if (!img) return;
+        const ro = new ResizeObserver(computeImgRect);
+        ro.observe(img.parentElement);
+        return () => ro.disconnect();
+    }, [computeImgRect, displayedResult]);
 
     const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB per chunk
     const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024; // 10 MB — use chunking above this
@@ -78,6 +110,7 @@ const ImageSubmission = () => {
         setAnalysisResult(null);
         setUploadedFilename("");
         setUploadProgress(0);
+        setTileGrid(null);
 
         try {
             setIsUploading(true);
@@ -109,7 +142,23 @@ const ImageSubmission = () => {
                         try {
                             const msg = JSON.parse(event.data);
                             if (msg.type === 'progress') {
+                                // If the backend sent an analysis-level preview, swap to it
+                                // so the tile overlay aligns with the actual image being tiled.
+                                if (msg.analysis_preview) {
+                                    setPreviewResult(prev => ({
+                                        ...prev,
+                                        original_image: msg.analysis_preview,
+                                    }));
+                                }
                                 setPatchProgress({ current: msg.current, total: msg.total, tissue_patches: msg.tissue_patches });
+                                if (msg.grid_rows !== undefined) {
+                                    setTileGrid(prev => {
+                                        const r = msg.grid_rows, c = msg.grid_cols;
+                                        const tiles = prev && prev.tiles.length === r * c ? [...prev.tiles] : new Array(r * c).fill(0);
+                                        tiles[msg.tile_row * c + msg.tile_col] = msg.is_tissue ? 2 : 1;
+                                        return { rows: r, cols: c, tiles };
+                                    });
+                                }
                             } else if (msg.type === 'result') {
                                 evtSource.close();
                                 resolve(msg.data);
@@ -144,6 +193,7 @@ const ImageSubmission = () => {
             setIsUploading(false);
             setIsAnalyzing(false);
             setPatchProgress(null);
+            setTileGrid(null);
         }
     }, []);
 
@@ -203,16 +253,87 @@ const ImageSubmission = () => {
         ? 'Running Diagnosis…'
         : isUploading
         ? `Uploading${uploadProgress > 0 && uploadProgress < 100 ? '… ' + uploadProgress + '%' : '…'}`
-        : analysisResult
-        ? 'Diagnosis Complete'
         : null;
+
+    const renderRadarChart = (data) => {
+        if (!data) return null;
+        const cx = 150, cy = 150, R = 80;
+        const N = 5;
+        const cats = [
+            { key: 'None',            label: 'None',            sub: 'F0' },
+            { key: 'Perisinusoidal',  label: 'Perisinusoidal',  sub: 'F1' },
+            { key: 'Periportal',      label: 'Periportal',      sub: 'F2' },
+            { key: 'Bridging',        label: 'Bridging',        sub: 'F3' },
+            { key: 'Cirrosis',        label: 'Cirrhosis',       sub: 'F4' },
+        ];
+        const angleOf = (i) => -Math.PI / 2 + (2 * Math.PI * i) / N;
+        const pts = cats.map((c, i) => {
+            const a = angleOf(i);
+            const v = data[c.key] || 0;
+            return {
+                x: cx + R * v * Math.cos(a),
+                y: cy + R * v * Math.sin(a),
+                ex: cx + R * Math.cos(a),
+                ey: cy + R * Math.sin(a),
+                v, label: c.label, sub: c.sub, angle: a, idx: i,
+            };
+        });
+        const poly = pts.map(p => `${p.x},${p.y}`).join(' ');
+        // web lines (pentagons at each ring)
+        const rings = [0.25, 0.5, 0.75, 1.0];
+        const webLines = rings.map(f => {
+            const webPts = cats.map((_, i) => {
+                const a = angleOf(i);
+                return `${cx + R * f * Math.cos(a)},${cy + R * f * Math.sin(a)}`;
+            }).join(' ');
+            return webPts;
+        });
+        return (
+            <svg viewBox="0 0 300 310" style={{ width: '100%', maxWidth: 280, display: 'block', margin: '0.5rem auto' }}>
+                {webLines.map((w, i) => (
+                    <polygon key={`web${i}`} points={w}
+                        fill="none" stroke="#253545" strokeWidth={0.75}
+                        strokeDasharray={rings[i] < 1 ? '4 4' : 'none'} />
+                ))}
+                {pts.map((p, i) => (
+                    <line key={`ax${i}`} x1={cx} y1={cy} x2={p.ex} y2={p.ey}
+                        stroke="#4ecdc4" strokeWidth={1.5} opacity={0.45} />
+                ))}
+                <polygon points={poly} fill="rgba(78,205,196,0.22)" stroke="#4ecdc4" strokeWidth={2} />
+                {pts.map((p, i) => (
+                    <circle key={`dot${i}`} cx={p.x} cy={p.y} r={4.5}
+                        fill="#0f1923" stroke="#4ecdc4" strokeWidth={2} />
+                ))}
+                {pts.map((p) => {
+                    const a = p.angle;
+                    const cos = Math.cos(a), sin = Math.sin(a);
+                    const isTop = sin < -0.3, isBot = sin > 0.3, isLeft = cos < -0.3, isRight = cos > 0.3;
+                    const anchor = isRight ? 'start' : isLeft ? 'end' : 'middle';
+                    const dx = isRight ? 14 : isLeft ? -14 : 0;
+                    const dy1 = isTop ? -22 : isBot ? 18 : -6;
+                    const dy2 = dy1 + 12;
+                    return (
+                        <g key={`lbl${p.idx}`}>
+                            <text x={p.ex + dx} y={p.ey + dy1} fill="#fff" fontSize="15" fontWeight="700"
+                                textAnchor={anchor}>{`${(p.v * 100).toFixed(0)}%`}</text>
+                            <text x={p.ex + dx} y={p.ey + dy2} fill="#8a9bae" fontSize="12"
+                                textAnchor={anchor}>{p.label}</text>
+                        </g>
+                    );
+                })}
+            </svg>
+        );
+    };
+
+    // Should we show the tile overlay on the original image?
+    const showTileOverlay = tileGrid && isAnalyzing;
 
     return (
         <div className="main-grid">
-            {/* ── Left: image panels ── */}
+            {/* ── Left: images + extent description ── */}
             <div className="images-col">
                 <div className="comparison-grid">
-                    {/* Original */}
+                    {/* Original — with tile overlay during analysis */}
                     <div
                         className={`img-panel drop-zone ${isDragging ? 'drag-over' : ''}`}
                         onDragOver={handleDragOver}
@@ -222,7 +343,7 @@ const ImageSubmission = () => {
                     >
                         <span className="img-label">Original PSR Staining</span>
                         {displayedResult?.original_image ? (
-                            <img alt="Original PSR" src={displayedResult.original_image} className="preview-image" draggable="false" onDragStart={(e) => e.preventDefault()} />
+                            <img ref={originalImgRef} onLoad={computeImgRect} alt="Original PSR" src={displayedResult.original_image} className="preview-image" draggable="false" onDragStart={(e) => e.preventDefault()} />
                         ) : image ? (
                             image.name.match(/\.(tif|tiff|svs)$/i) ? (
                                 <div className="placeholder-text" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', alignItems: 'center' }}>
@@ -231,9 +352,9 @@ const ImageSubmission = () => {
                                     <span style={{ fontSize: '0.75rem', opacity: 0.7 }}>Generating preview...</span>
                                 </div>
                             ) : (
-                                <img 
-                                    alt="Selected" 
-                                    src={URL.createObjectURL(image)} 
+                                <img
+                                    alt="Selected"
+                                    src={URL.createObjectURL(image)}
                                     className="preview-image"
                                     draggable="false"
                                     onDragStart={(e) => e.preventDefault()}
@@ -245,6 +366,47 @@ const ImageSubmission = () => {
                                 <div style={{ fontSize: '0.7rem', opacity: 0.7, marginTop: '0.4rem', color: '#ffffff' }}>SVS / TIF — any size &nbsp;·&nbsp; JPG / PNG / BMP — max 50 MB</div>
                             </div>
                         )}
+
+                        {/* Filename & change message at bottom of frame */}
+                        {image && (
+                            <div className="img-panel-footer">
+                                <span className="img-panel-filename">📄 {image.name}</span>
+                                <span className="img-panel-change" onClick={handleClick}>Click or drop to change</span>
+                            </div>
+                        )}
+
+                        {/* Tile grid overlay — positioned over the actual image content only */}
+                        {showTileOverlay && imgContentRect && (
+                            <div className="tile-overlay" style={{
+                                left: imgContentRect.left,
+                                top: imgContentRect.top,
+                                width: imgContentRect.width,
+                                height: imgContentRect.height,
+                                gridTemplateColumns: `repeat(${tileGrid.cols}, 1fr)`,
+                                gridTemplateRows: `repeat(${tileGrid.rows}, 1fr)`,
+                            }}>
+                                {tileGrid.tiles.map((s, i) => (
+                                    <div key={i} className={`tile-cell ${s === 2 ? 'tile-tissue' : s === 1 ? 'tile-bg' : 'tile-pending'}`} />
+                                ))}
+                            </div>
+                        )}
+
+                        {/* Green progress bar at bottom of upload image */}
+                        {(isUploading || isAnalyzing) && (
+                            <div className="img-progress-bar-track">
+                                <div
+                                    className="img-progress-bar-fill"
+                                    style={{
+                                        width: isAnalyzing && patchProgress
+                                            ? `${Math.round((patchProgress.current / patchProgress.total) * 100)}%`
+                                            : isUploading
+                                            ? `${uploadProgress}%`
+                                            : '0%',
+                                    }}
+                                />
+                            </div>
+                        )}
+
                         <input
                             ref={fileInputRef}
                             type="file"
@@ -270,22 +432,22 @@ const ImageSubmission = () => {
                     </div>
                 </div>
 
-                {/* Bottom bar */}
-                <div className="bottom-bar">
-                    <div className="file-info">
-                        <span className="file-icon">📄</span>
-                        <span className="file-name">{image ? image.name : 'No file selected'}</span>
-                        <div
-                            className="change-link"
-                            onClick={handleClick}
-                        >
-                            Click or Drop to Change
-                        </div>
-                    </div>
-
-                    <div className="status-indicator" style={{ color: isAnalyzing ? '#4ecdc4' : '#8a9bae', fontSize: '0.85rem' }}>
-                        {(isAnalyzing || isUploading) && <span style={{ marginRight: '0.5rem' }}>⏳</span>}
-                        {pipelineStatus}
+                {/* Extent description spanning full width under both images */}
+                <div className="extent-description">
+                    <div className="report-card info-card">
+                        <p>
+                            <strong>Visualization & Extent:</strong> White pixels indicate detected collagen fibers
+                            isolated via colour deconvolution and adaptive thresholding.
+                        </p>
+                        <p style={{ marginTop: '0.4rem' }}>
+                            <strong>Staging:</strong> Disease category is classified by analyzing the
+                            architectural patterns of these fibers using a VGG16 neural network and Fuzzy C-Means clustering.
+                        </p>
+                        {analysisResult?.patch_count && (
+                            <p style={{ marginTop: '0.4rem', fontSize: '0.72rem' }}>
+                                Patch-based analysis: {analysisResult.patch_count} tissue patches processed
+                            </p>
+                        )}
                     </div>
                 </div>
 
@@ -294,7 +456,16 @@ const ImageSubmission = () => {
 
             {/* ── Right: diagnosis report ── */}
             <aside className="report-col">
-                <h2 className="report-title">DIAGNOSIS REPORT</h2>
+                <div className="report-header">
+                    <h2 className="report-title">DIAGNOSIS REPORT</h2>
+                    <button
+                        className="csv-btn-inline"
+                        onClick={handleDownloadCsv}
+                        disabled={!uploadedFilename || isUploading || isAnalyzing}
+                    >
+                        ⬇ Download CSV
+                    </button>
+                </div>
 
                 {/* Patch progress card — only visible during SVS/TIF analysis */}
                 {patchProgress && isAnalyzing && (
@@ -316,7 +487,7 @@ const ImageSubmission = () => {
                     </div>
                 )}
 
-                <div className="report-card">
+                <div className="report-card" style={{ border: '1px solid #4ecdc4' }}>
                     <p className="report-label">Fibrosis Extent</p>
                     <div className="extent-bar-track">
                         <div
@@ -329,63 +500,18 @@ const ImageSubmission = () => {
                     </p>
                 </div>
 
-                <div className="report-card">
-                    <p className="report-label">Classification</p>
-                    <p className="report-class">
-                        {analysisResult?.cluster_label
-                            ? analysisResult.cluster_label.replace(/^Category \w: /, 'Category $&'.slice(9, 10) + ': ').length
-                                ? analysisResult.cluster_label
-                                : '--'
-                            : '--'}
-                    </p>
-                </div>
-
-                {/* Membership probability breakdown */}
+                {/* FCM Membership Radar Chart — 5 categories + spectrum note */}
                 {analysisResult && (analysisResult.None !== undefined) && (
-                    <div className="report-card">
-                        <p className="report-label">FCM Membership Probabilities</p>
-                        {[
-                            { label: 'None', value: analysisResult.None, color: '#4ecdc4' },
-                            { label: 'Perisinusoidal', value: analysisResult.Perisinusoidal, color: '#f7b731' },
-                            { label: 'Bridging', value: analysisResult.Bridging, color: '#fc5c65' },
-                            { label: 'Cirrosis', value: analysisResult.Cirrosis, color: '#a55eea' },
-                        ].map(({ label, value, color }) => (
-                            <div key={label} style={{ marginBottom: '0.35rem' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: '#c5cdd5', marginBottom: '2px' }}>
-                                    <span>{label}</span>
-                                    <span>{(value * 100).toFixed(1)}%</span>
-                                </div>
-                                <div className="extent-bar-track" style={{ height: '4px' }}>
-                                    <div style={{ height: '100%', width: `${Math.min(value * 100, 100)}%`, background: color, borderRadius: '3px', transition: 'width 0.4s ease' }} />
-                                </div>
-                            </div>
-                        ))}
+                    <div className="report-card" style={{ border: '1px solid #4ecdc4' }}>
+                        <p className="report-label">FCM Cluster Membership</p>
+                        {renderRadarChart(analysisResult)}
+                        <p style={{ fontSize: '0.78rem', color: '#8a9bae', lineHeight: 1.5, marginTop: '0.25rem', borderTop: '1px solid #253545', paddingTop: '0.4rem' }}>
+                            <strong style={{ color: '#f7b731' }}>Gradual Spectrum:</strong>{' '}
+                            Fibrosis stages (F0–F4) overlap continuously. FCM assigns probabilistic membership rather than a hard category.
+                        </p>
                     </div>
                 )}
 
-                <div className="report-card info-card">
-                    <p>
-                        <strong>Visualization & Extent:</strong> White pixels indicate detected collagen fibers 
-                        isolated via RGB color deconvolution and thresholding (Mathematical Filter).
-                    </p>
-                    <p style={{ marginTop: '0.4rem' }}>
-                        <strong>Staging:</strong> Disease category (A-D) is classified by analyzing the 
-                        architectural patterns of these fibers using a VGG16 neural network and Fuzzy C-Means clustering (AI).
-                    </p>
-                    {analysisResult?.patch_count && (
-                        <p style={{ marginTop: '0.4rem', fontSize: '0.72rem', opacity: 0.7 }}>
-                            Patch-based analysis: {analysisResult.patch_count} tissue patches processed
-                        </p>
-                    )}
-                </div>
-
-                <button
-                    className="csv-btn"
-                    onClick={handleDownloadCsv}
-                    disabled={!uploadedFilename || isUploading || isAnalyzing}
-                >
-                    Download CSV Diagnosis
-                </button>
             </aside>
         </div>
     );

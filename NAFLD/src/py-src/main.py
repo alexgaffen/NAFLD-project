@@ -1,7 +1,5 @@
 # pip freeze the erqs from the backend and just integrate it here
 # add new gitignores here as well from the other project
-# 
-
 
 # python -m pip install -r ./setup.txt
 # flask --app .\NAFLD\src\py-src\main.py run
@@ -87,13 +85,15 @@ def analyze_file_stream(filename):
 
     progress_queue = queue.Queue()
 
-    def on_progress(current, total, tissue_count):
-        progress_queue.put({
+    def on_progress(current, total, tissue_count, **kwargs):
+        msg = {
             'type': 'progress',
             'current': current,
             'total': total,
             'tissue_patches': tissue_count,
-        })
+        }
+        msg.update(kwargs)
+        progress_queue.put(msg)
 
     result_holder = [None]
 

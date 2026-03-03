@@ -24,7 +24,7 @@ html, body, #root {
   gap: 1rem;
   padding: 0.5rem 1.25rem;
   background: #16202b;
-  border-bottom: 1px solid #253545;
+  border-bottom: 3px solid rgba(255,255,255,0.85);
   flex-shrink: 0;
 }
 .top-bar-left {
@@ -46,6 +46,14 @@ html, body, #root {
   border-left: 1px solid #3a4f63;
   padding-left: 1rem;
 }
+.top-bar-pipeline {
+  font-size: 0.7rem;
+  letter-spacing: 1.5px;
+  color: #4ecdc4;
+  border-left: 1px solid #3a4f63;
+  padding-left: 1rem;
+  white-space: nowrap;
+}
 
 /* ── Pipeline label ── */
 .pipeline-label {
@@ -64,9 +72,9 @@ html, body, #root {
   flex: 1;
   display: grid;
   grid-template-columns: 1fr 340px;
-  gap: 0.75rem;
-  padding: 0.6rem 1rem;
-  min-height: 0;              /* allow shrink */
+  gap: 0 0.5rem;
+  padding: 0 1rem 0.3rem;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -75,14 +83,21 @@ html, body, #root {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  gap: 0.35rem;
+  padding-top: 0.4rem;
 }
 
 .comparison-grid {
   flex: 1;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 0.75rem;
+  gap: 0.5rem;
   min-height: 0;
+}
+
+/* ── Extent description spanning under both images ── */
+.extent-description {
+  flex-shrink: 0;
 }
 
 /* ── Image panel (outlined upload zone) ── */
@@ -121,6 +136,54 @@ html, body, #root {
   color: #c5cdd5;
 }
 .img-label.accent { color: #4ecdc4; border: 1px solid #4ecdc4; }
+
+/* Filename footer inside the image upload panel */
+.img-panel-footer {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.3rem 0.6rem;
+  background: rgba(15, 25, 35, 0.88);
+  z-index: 4;
+  font-size: 0.72rem;
+}
+.img-panel-filename {
+  color: #c5cdd5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 60%;
+}
+.img-panel-change {
+  color: #8a9bae;
+  cursor: pointer;
+  font-size: 0.68rem;
+  white-space: nowrap;
+  transition: color 0.2s;
+}
+.img-panel-change:hover { color: #4ecdc4; }
+
+/* Green progress bar at bottom of upload panel */
+.img-progress-bar-track {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 5px;
+  background: rgba(30,45,61,0.6);
+  z-index: 5;
+}
+.img-progress-bar-fill {
+  height: 100%;
+  background: #4ecdc4;
+  border-radius: 0 2px 2px 0;
+  transition: width 0.35s ease;
+  box-shadow: 0 0 8px rgba(78,205,196,0.5);
+}
 
 .download-mask-btn {
   position: absolute;
@@ -161,7 +224,7 @@ html, body, #root {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: 0.5rem;
+  margin-top: 0.25rem;
   flex-shrink: 0;
   gap: 0.75rem;
 }
@@ -204,9 +267,101 @@ html, body, #root {
 .report-col {
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  gap: 0.5rem;
   min-height: 0;
   overflow-y: auto;
+  border-left: 3px solid rgba(255,255,255,0.85);
+  padding: 0.5rem 0 0 0.75rem;
+  margin-top: -0px;
+}
+
+/* ── Tile overlay on original image ── */
+.tile-overlay {
+  position: absolute;
+  display: grid;
+  z-index: 3;
+  pointer-events: none;
+}
+.tile-cell {
+  position: relative;
+  overflow: hidden;
+}
+/* All tiles get diagonal hatching */
+.tile-cell::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent,
+    transparent 3px,
+    rgba(78,205,196,0.18) 3px,
+    rgba(78,205,196,0.18) 4px
+  );
+}
+/* Shimmer sweep across every cell */
+.tile-cell::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    -45deg,
+    transparent 30%,
+    rgba(78,205,196,0.35) 50%,
+    transparent 70%
+  );
+  background-size: 300% 300%;
+  animation: tile-shimmer 2.4s ease-in-out infinite;
+}
+/* Tissue tiles: brighter green tint */
+.tile-tissue {
+  background: rgba(78,205,196,0.15);
+  border: 1px solid rgba(78,205,196,0.35);
+}
+.tile-tissue::after {
+  background: linear-gradient(
+    -45deg,
+    transparent 30%,
+    rgba(78,205,196,0.5) 50%,
+    transparent 70%
+  );
+  background-size: 300% 300%;
+  animation: tile-shimmer 2.4s ease-in-out infinite;
+}
+/* Background tiles: dim */
+.tile-bg {
+  background: rgba(30,45,61,0.3);
+  border: 1px solid rgba(37,53,69,0.4);
+}
+.tile-bg::after {
+  background: linear-gradient(
+    -45deg,
+    transparent 30%,
+    rgba(78,205,196,0.12) 50%,
+    transparent 70%
+  );
+  background-size: 300% 300%;
+  animation: tile-shimmer 2.4s ease-in-out infinite;
+}
+/* Pending tiles: very dark */
+.tile-pending {
+  background: rgba(20,30,40,0.2);
+  border: 1px solid rgba(37,53,69,0.2);
+}
+.tile-pending::after {
+  background: linear-gradient(
+    -45deg,
+    transparent 30%,
+    rgba(78,205,196,0.08) 50%,
+    transparent 70%
+  );
+  background-size: 300% 300%;
+  animation: tile-shimmer 3s ease-in-out infinite;
+}
+
+@keyframes tile-shimmer {
+  0%   { background-position: 100% 100%; }
+  100% { background-position: 0% 0%; }
 }
 
 .report-title {
@@ -215,6 +370,26 @@ html, body, #root {
   letter-spacing: 2px;
   color: #c5cdd5;
 }
+.report-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.csv-btn-inline {
+  padding: 0.3rem 0.7rem;
+  border: 1px solid #3a4f63;
+  border-radius: 0.35rem;
+  background: #1a2a3a;
+  color: #c5cdd5;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.2s;
+}
+.csv-btn-inline:hover:not(:disabled) { background: #253545; color: #4ecdc4; }
+.csv-btn-inline:disabled { opacity: 0.35; cursor: not-allowed; }
 
 .report-card {
   background: #16202b;
@@ -223,7 +398,7 @@ html, body, #root {
   padding: 0.65rem 0.85rem;
 }
 .report-label {
-  font-size: 0.75rem;
+  font-size: 0.85rem;
   color: #8a9bae;
   margin-bottom: 0.25rem;
 }

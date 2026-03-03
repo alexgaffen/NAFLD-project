@@ -12,11 +12,10 @@ function App() {
         <span className="top-bar-subtitle">
           AI-BASED UNSUPERVISED CLASSIFICATION AND QUANTIFICATION OF MOUSE LIVER FIBROSIS IN MASH
         </span>
+        <span className="top-bar-pipeline">
+          VGG16 FEATURE EXTRACTION → FUZZY C-MEANS CLUSTERING
+        </span>
       </header>
-
-      <p className="pipeline-label">
-        QUANTIFICATION PIPELINE: VGG16 FEATURE EXTRACTION → FUZZY C-MEANS CLUSTERING
-      </p>
 
       {/* ── Main content ── */}
       <ImageSubmission />
