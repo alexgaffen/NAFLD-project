@@ -48,6 +48,10 @@ from IPython.display import display
 # drive.mount('/content/drive', force_remount=True)
 psr_results = []
 
+# Cache for deconvolution data so rethresholding is instant.
+# Keyed by cache_key (string) -> { red_stain, tissue_mask, img_shape }
+_deconv_cache = {}
+
 # Point to the 'models' subfolder
 model_save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
 
@@ -251,7 +255,198 @@ def fibrosis_filter(window, stain_matrix=None):
 
     result_image_pil = Image.fromarray(result_image)
 
-    return result_image_pil, total_selected_pixels, selected_ratio, tissue_pixel_count
+    return result_image_pil, total_selected_pixels, selected_ratio, tissue_pixel_count, thresh
+
+
+def cache_deconv_data(cache_key, red_stain, tissue_mask, img_shape, auto_threshold=None):
+    """Store deconvolution intermediates so rethreshold is instant."""
+    _deconv_cache.clear()  # only keep one cached image at a time
+    _deconv_cache[cache_key] = {
+        'red_stain': red_stain,
+        'tissue_mask': tissue_mask,
+        'img_shape': img_shape,
+        'auto_threshold': auto_threshold,
+    }
+
+
+def rethreshold(cache_key, new_threshold):
+    """Apply a new global threshold to cached deconvolution data.
+    Resets any per-pixel area deltas. Returns (mask_pil, total_pixels, ratio, tissue_count) or None."""
+    entry = _deconv_cache.get(cache_key)
+    if entry is None:
+        return None
+
+    red_stain = entry['red_stain']
+    tissue_mask = entry['tissue_mask']
+    h, w = red_stain.shape
+
+    raw = (red_stain > new_threshold) & tissue_mask
+    entry['raw_mask'] = raw.copy()
+    entry['has_local_edits'] = False
+    entry['current_threshold'] = new_threshold
+    entry['threshold_delta'] = np.zeros((h, w), dtype=np.float32)
+    entry['undo_stack'] = []
+    entry['_last_edit_region'] = None
+
+    mask = raw.astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+    total_selected = int(np.sum(mask == 255))
+    tissue_count = int(np.sum(tissue_mask))
+    ratio = (total_selected / tissue_count * 100) if tissue_count > 0 else 0.0
+
+    result_image = np.zeros((h, w, 3), dtype=np.uint8)
+    result_image[mask == 255] = [255, 255, 255]
+    mask_pil = Image.fromarray(result_image)
+
+    return mask_pil, total_selected, ratio, tissue_count
+
+
+def _regions_similar(r1, r2, tol=5):
+    """Check if two pixel regions are close enough to be the same magnifier area."""
+    return (abs(r1[0] - r2[0]) <= tol and abs(r1[1] - r2[1]) <= tol and
+            abs(r1[2] - r2[2]) <= tol and abs(r1[3] - r2[3]) <= tol)
+
+
+def _recompute_mask(entry):
+    """Recompute fibrosis mask from current threshold_delta. Returns (mask_pil, total, ratio, tissue_count)."""
+    red_stain = entry['red_stain']
+    tissue_mask = entry['tissue_mask']
+    h, w = red_stain.shape
+    base_thresh = entry.get('current_threshold', entry.get('auto_threshold', 2.4))
+    td = entry.get('threshold_delta')
+    if td is not None and np.any(td != 0):
+        effective = base_thresh + td
+    else:
+        effective = base_thresh
+    raw = (red_stain > effective) & tissue_mask
+    entry['raw_mask'] = raw
+    mask = raw.astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    total_selected = int(np.sum(mask == 255))
+    tissue_count = int(np.sum(tissue_mask))
+    ratio = (total_selected / tissue_count * 100) if tissue_count > 0 else 0.0
+    result_image = np.zeros((h, w, 3), dtype=np.uint8)
+    result_image[mask == 255] = [255, 255, 255]
+    mask_pil = Image.fromarray(result_image)
+    return mask_pil, total_selected, ratio, tissue_count
+
+
+def rethreshold_area(cache_key, delta, x1, y1, x2, y2):
+    """Apply a relative threshold delta to a specific normalised region (0-1 coords).
+    Each pixel accumulates its own offset; clamped at +/-1.5.
+    Returns (mask_pil, total_pixels, ratio, tissue_count) or None."""
+    entry = _deconv_cache.get(cache_key)
+    if entry is None:
+        return None
+
+    red_stain = entry['red_stain']
+    tissue_mask = entry['tissue_mask']
+    h, w = red_stain.shape
+
+    if 'threshold_delta' not in entry:
+        entry['threshold_delta'] = np.zeros((h, w), dtype=np.float32)
+    if 'undo_stack' not in entry:
+        entry['undo_stack'] = []
+
+    base_thresh = entry.get('current_threshold', entry.get('auto_threshold', 2.4))
+
+    px1 = max(0, int(x1 * w))
+    py1 = max(0, int(y1 * h))
+    px2 = min(w, int(x2 * w))
+    py2 = min(h, int(y2 * h))
+
+    if px2 <= px1 or py2 <= py1:
+        return None
+
+    # Push undo snapshot when editing a new region
+    current_region = (px1, py1, px2, py2)
+    last_region = entry.get('_last_edit_region')
+    if last_region is None or not _regions_similar(last_region, current_region):
+        entry['undo_stack'].append(entry['threshold_delta'].copy())
+        entry['_last_edit_region'] = current_region
+
+    MAX_DELTA = 1.5
+    region = entry['threshold_delta'][py1:py2, px1:px2]
+    region += delta
+    np.clip(region, -MAX_DELTA, MAX_DELTA, out=region)
+
+    entry['has_local_edits'] = True
+
+    return _recompute_mask(entry)
+
+
+def reset_area(cache_key, x1, y1, x2, y2):
+    """Reset threshold delta to zero in a specific normalised region.
+    Pushes current state to undo stack."""
+    entry = _deconv_cache.get(cache_key)
+    if entry is None:
+        return None
+
+    h, w = entry['red_stain'].shape
+
+    if 'threshold_delta' not in entry:
+        entry['threshold_delta'] = np.zeros((h, w), dtype=np.float32)
+    if 'undo_stack' not in entry:
+        entry['undo_stack'] = []
+
+    px1 = max(0, int(x1 * w))
+    py1 = max(0, int(y1 * h))
+    px2 = min(w, int(x2 * w))
+    py2 = min(h, int(y2 * h))
+
+    if px2 <= px1 or py2 <= py1:
+        return None
+
+    entry['undo_stack'].append(entry['threshold_delta'].copy())
+    entry['_last_edit_region'] = None
+    entry['threshold_delta'][py1:py2, px1:px2] = 0.0
+    entry['has_local_edits'] = bool(np.any(entry['threshold_delta'] != 0))
+
+    return _recompute_mask(entry)
+
+
+def undo_area(cache_key):
+    """Undo the last area modification by restoring from the undo stack."""
+    entry = _deconv_cache.get(cache_key)
+    if entry is None:
+        return None
+
+    undo_stack = entry.get('undo_stack', [])
+    if not undo_stack:
+        return None
+
+    entry['threshold_delta'] = undo_stack.pop()
+    entry['_last_edit_region'] = None
+    entry['has_local_edits'] = bool(np.any(entry['threshold_delta'] != 0))
+
+    return _recompute_mask(entry)
+
+
+def get_delta_map(cache_key):
+    """Return a small base64 PNG showing modified regions in green, untouched in white."""
+    entry = _deconv_cache.get(cache_key)
+    if entry is None:
+        return None
+    td = entry.get('threshold_delta')
+    if td is None or not np.any(td != 0):
+        return None
+    h, w = td.shape
+    modified = (td != 0).astype(np.uint8)
+    max_side = 100
+    scale = max_side / max(h, w)
+    map_h = max(1, int(h * scale))
+    map_w = max(1, int(w * scale))
+    modified_small = cv2.resize(modified, (map_w, map_h), interpolation=cv2.INTER_NEAREST)
+    img = np.full((map_h, map_w, 4), [255, 255, 255, 255], dtype=np.uint8)
+    img[modified_small > 0] = [78, 205, 196, 255]
+    pil_img = Image.fromarray(img, 'RGBA')
+    buf = BytesIO()
+    pil_img.save(buf, format='PNG')
+    return base64.b64encode(buf.getvalue()).decode('utf-8')
+
 
 def predict_cluster_pil(pil_image, already_filtered=False, original_pil=None):
     """
@@ -272,7 +467,7 @@ def predict_cluster_pil(pil_image, already_filtered=False, original_pil=None):
     if already_filtered:
         percentage = None
     else:
-        _, _, percentage, _ = fibrosis_filter(image)
+        _, _, percentage, _, _ = fibrosis_filter(image)
 
     # VGG16 must see the original RGB tissue, NOT the B&W mask
     feature_source = original_pil if original_pil is not None else pil_image
@@ -301,7 +496,7 @@ def update_filter_slide_legacy(change):
     region = slide.read_region((x, y), level, (window_width, window_height))
     region = region.convert("RGB")  # Convert to RGB
 
-    result_image_pil, total_selected_pixels, selected_ratio, _ = fibrosis_filter(region)
+    result_image_pil, total_selected_pixels, selected_ratio, _, _ = fibrosis_filter(region)
     u, cluster_label, _ = predict_cluster_pil(result_image_pil, already_filtered=True, original_pil=region)
 
     with output:
@@ -335,7 +530,7 @@ def update_filter_slide(image_folder,file,level_slider,x_slider,y_slider,window_
     region = slide.read_region((x, y), level, (window_width, window_height))
     region = region.convert("RGB")  # Convert to RGB
 
-    result_image_pil, total_selected_pixels, selected_ratio, _ = fibrosis_filter(region)
+    result_image_pil, total_selected_pixels, selected_ratio, _, _ = fibrosis_filter(region)
     u, cluster_label, _ = predict_cluster_pil(result_image_pil, already_filtered=True, original_pil=region)
 
     output = widgets.Output()
@@ -371,7 +566,7 @@ def update_filter_image(change):
     original_image = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
     output = widgets.Output()
     original_pil = Image.fromarray(original_image)
-    result_image_pil, total_selected_pixels, selected_ratio, _ = fibrosis_filter(original_image)
+    result_image_pil, total_selected_pixels, selected_ratio, _, _ = fibrosis_filter(original_image)
     u, cluster_label, _ = predict_cluster_pil(result_image_pil, already_filtered=True, original_pil=original_pil)
     with output:
         output.clear_output(wait=True)
@@ -403,7 +598,7 @@ def predict_cluster(image_path, stain_matrix=None):
 
     image = cv2.imread(image_path)
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    img, pxl, percentage, _ = fibrosis_filter(image, stain_matrix)
+    img, pxl, percentage, _, _ = fibrosis_filter(image, stain_matrix)
     # Pass the original RGB image to VGG16, not the B&W mask
     original_pil = Image.fromarray(image)
     features = extract_features(original_pil)
@@ -498,7 +693,7 @@ def _is_tissue_patch(patch_np):
     return (np.sum(gray > 220) / gray.size) < 0.95
 
 
-def _select_slide_level(slide, max_dim=4096):
+def _select_slide_level(slide, max_dim=8192):
     """Pick the highest-resolution level whose longest side fits in *max_dim*."""
     for level, (w, h) in enumerate(slide.level_dimensions):
         if max(w, h) <= max_dim:
@@ -506,7 +701,7 @@ def _select_slide_level(slide, max_dim=4096):
     return len(slide.level_dimensions) - 1
 
 
-def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=4096, progress_callback=None):
+def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=8192, progress_callback=None):
     """
     Patch-based analysis for SVS (and large TIF) files.
 
@@ -582,9 +777,32 @@ def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=40
             del preview_pil
 
         # ── Run fibrosis_filter on the FULL image (no seams) ──
-        full_mask_pil, total_fibrosis_pixels, overall_ratio, total_tissue_pixels = fibrosis_filter(full_image)
+        full_mask_pil, total_fibrosis_pixels, overall_ratio, total_tissue_pixels, auto_thresh = fibrosis_filter(full_image)
         full_mask = np.array(full_mask_pil)
         del full_mask_pil
+
+        # Cache deconvolution data for interactive rethresholding
+        _sm = globals()['stain_matrix']
+        _tpx = full_image[(full_image.sum(axis=-1) > 50) & (np.mean(full_image, axis=2) < 240)]
+        if _tpx.size > 0:
+            _cm = float(np.median(_tpx))
+            if _cm > 10:
+                _img_n = np.clip(full_image.astype(np.float32) * (160.0 / _cm), 0, 255).astype(np.uint8)
+            else:
+                _img_n = full_image
+        else:
+            _img_n = full_image
+        _img_f = _img_n.astype(np.float32) / 255.0
+        _stains = np.dot(-np.log(_img_f + np.finfo(float).eps), _sm.T)
+        cache_deconv_data(
+            os.path.basename(file_path),
+            _stains[:, :, 0],
+            (_img_n.sum(axis=-1) > 50) & (np.mean(_img_n, axis=2) < 220),
+            full_image.shape,
+            auto_threshold=auto_thresh,
+        )
+        del _tpx, _img_n, _img_f, _stains
+
         print(f"[Patch] Full-image fibrosis filter: {overall_ratio:.2f}%  tissue_px={total_tissue_pixels}")
 
         patch_count = 0
@@ -643,10 +861,10 @@ def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=40
 
         # ── Resize for frontend display, then free large arrays ──
         display_orig = Image.fromarray(full_image)
-        display_orig.thumbnail((2048, 2048), Image.LANCZOS)
+        display_orig.thumbnail((8192, 8192), Image.LANCZOS)
 
         display_mask = Image.fromarray(full_mask)
-        display_mask.thumbnail((2048, 2048), Image.LANCZOS)
+        display_mask.thumbnail((8192, 8192), Image.LANCZOS)
 
         del full_image, full_mask
         gc.collect()
@@ -666,6 +884,7 @@ def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=40
             "fibrosis_ratio": float(overall_ratio),
             "cluster_label": label_text,
             "membership_scores": membership_scores,
+            "threshold": float(auto_thresh),
             "patch_count": patch_count,
             "None": membership_scores["None"],
             "Perisinusoidal": membership_scores["Perisinusoidal"],
@@ -685,7 +904,7 @@ def preview_single_file(file_path, preview_size=1536):
     try:
         img_pil = open_image_for_processing(file_path, max_side=preview_size)
         img_np = np.array(img_pil)
-        filtered_pil, total_pixels, ratio, _ = fibrosis_filter(img_np)
+        filtered_pil, total_pixels, ratio, _, _ = fibrosis_filter(img_np)
 
         return {
             "status": "success",
@@ -735,8 +954,26 @@ def analyze_single_file(file_path):
         # 2. Run your existing Fibrosis Filter
         # Note: We convert PIL -> Numpy for your filter
         img_np = np.array(img_pil)
-        # Your fibrosis_filter returns: (result_pil, total_pixels, ratio, tissue_pixel_count)
-        filtered_pil, total_pixels, ratio, _ = fibrosis_filter(img_np)
+        filtered_pil, total_pixels, ratio, _, auto_thresh = fibrosis_filter(img_np)
+
+        # Cache deconvolution data for rethresholding
+        cache_key = os.path.basename(file_path)
+        # Recompute the intermediates for caching (lightweight)
+        _sm = globals()['stain_matrix']
+        tissue_px = img_np[(img_np.sum(axis=-1) > 50) & (np.mean(img_np, axis=2) < 240)]
+        if tissue_px.size > 0:
+            cm = float(np.median(tissue_px))
+            if cm > 10:
+                img_n = np.clip(img_np.astype(np.float32) * (160.0 / cm), 0, 255).astype(np.uint8)
+            else:
+                img_n = img_np
+        else:
+            img_n = img_np
+        img_f = img_n.astype(np.float32) / 255.0
+        stains = np.dot(-np.log(img_f + np.finfo(float).eps), _sm.T)
+        cache_deconv_data(cache_key, stains[:, :, 0],
+                         (img_n.sum(axis=-1) > 50) & (np.mean(img_n, axis=2) < 220),
+                         img_np.shape, auto_threshold=auto_thresh)
 
         # 3. Run your existing Cluster Prediction
         # Pass original RGB to VGG16 for meaningful features
@@ -759,6 +996,7 @@ def analyze_single_file(file_path):
             "fibrosis_ratio": float(ratio),
             "cluster_label": label_text,
             "membership_scores": membership_scores,
+            "threshold": float(auto_thresh),
             "None": membership_scores["None"],
             "Perisinusoidal": membership_scores["Perisinusoidal"],
             "Bridging": membership_scores["Bridging"],

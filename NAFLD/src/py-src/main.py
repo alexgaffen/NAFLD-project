@@ -12,7 +12,7 @@ import zipfile
 import io
 import csv
 from werkzeug.utils import secure_filename
-from nafld import analyze_single_file, preview_single_file, analyze_single_file_patched
+from nafld import analyze_single_file, preview_single_file, analyze_single_file_patched, rethreshold, rethreshold_area, reset_area, undo_area, get_delta_map, pil_to_b64
 
 # sys.path.append("C:\\Projects\\Machine Learning\\NAFLD\\NAFLD-project\\NAFLD\\src\\py-src\\nafld.py")
 from nafld import process_all_images
@@ -134,6 +134,106 @@ def preview_file(filename):
     return jsonify(result), 200
 
 
+@app.route("/rethreshold/<filename>", methods=['GET'])
+def rethreshold_file(filename):
+    """Apply a user-chosen threshold to cached deconvolution data."""
+    thresh_str = request.args.get('threshold')
+    if thresh_str is None:
+        return jsonify({'error': 'Missing threshold parameter'}), 400
+    try:
+        new_thresh = float(thresh_str)
+    except ValueError:
+        return jsonify({'error': 'Invalid threshold value'}), 400
+
+    # The cache key is the basename used during analysis
+    result = rethreshold(filename, new_thresh)
+    if result is None:
+        return jsonify({'error': 'No cached data for this file. Re-run analysis first.'}), 404
+
+    mask_pil, total_px, ratio, tissue_count = result
+    return jsonify({
+        'status': 'success',
+        'filtered_image': f"data:image/jpeg;base64,{pil_to_b64(mask_pil)}",
+        'fibrosis_ratio': float(ratio),
+        'threshold': new_thresh,
+    }), 200
+
+
+@app.route("/rethreshold-area/<filename>", methods=['GET'])
+def rethreshold_area_file(filename):
+    """Apply a relative threshold delta to a specific region."""
+    try:
+        delta = float(request.args.get('delta', ''))
+        x1 = float(request.args.get('x1', ''))
+        y1 = float(request.args.get('y1', ''))
+        x2 = float(request.args.get('x2', ''))
+        y2 = float(request.args.get('y2', ''))
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Missing or invalid parameters (delta, x1, y1, x2, y2)'}), 400
+
+    result = rethreshold_area(filename, delta, x1, y1, x2, y2)
+    if result is None:
+        return jsonify({'error': 'No cached data or invalid region'}), 404
+
+    mask_pil, total_px, ratio, tissue_count = result
+    delta_map_b64 = get_delta_map(filename)
+    return jsonify({
+        'status': 'success',
+        'filtered_image': f"data:image/jpeg;base64,{pil_to_b64(mask_pil)}",
+        'fibrosis_ratio': float(ratio),
+        'delta_map': f"data:image/png;base64,{delta_map_b64}" if delta_map_b64 else None,
+        'has_local_edits': True,
+    }), 200
+
+
+@app.route("/reset-area/<filename>", methods=['GET'])
+def reset_area_file(filename):
+    """Reset threshold delta to zero in a specific region."""
+    try:
+        x1 = float(request.args.get('x1', ''))
+        y1 = float(request.args.get('y1', ''))
+        x2 = float(request.args.get('x2', ''))
+        y2 = float(request.args.get('y2', ''))
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Missing or invalid parameters (x1, y1, x2, y2)'}), 400
+
+    result = reset_area(filename, x1, y1, x2, y2)
+    if result is None:
+        return jsonify({'error': 'No cached data or invalid region'}), 404
+
+    mask_pil, total_px, ratio, tissue_count = result
+    delta_map_b64 = get_delta_map(filename)
+    from nafld import _deconv_cache
+    has_edits = _deconv_cache.get(filename, {}).get('has_local_edits', False)
+    return jsonify({
+        'status': 'success',
+        'filtered_image': f"data:image/jpeg;base64,{pil_to_b64(mask_pil)}",
+        'fibrosis_ratio': float(ratio),
+        'delta_map': f"data:image/png;base64,{delta_map_b64}" if delta_map_b64 else None,
+        'has_local_edits': has_edits,
+    }), 200
+
+
+@app.route("/undo-area/<filename>", methods=['GET'])
+def undo_area_file(filename):
+    """Undo the last area modification."""
+    result = undo_area(filename)
+    if result is None:
+        return jsonify({'error': 'Nothing to undo'}), 404
+
+    mask_pil, total_px, ratio, tissue_count = result
+    delta_map_b64 = get_delta_map(filename)
+    from nafld import _deconv_cache
+    has_edits = _deconv_cache.get(filename, {}).get('has_local_edits', False)
+    return jsonify({
+        'status': 'success',
+        'filtered_image': f"data:image/jpeg;base64,{pil_to_b64(mask_pil)}",
+        'fibrosis_ratio': float(ratio),
+        'delta_map': f"data:image/png;base64,{delta_map_b64}" if delta_map_b64 else None,
+        'has_local_edits': has_edits,
+    }), 200
+
+
 @app.route("/download-single/<filename>", methods=['GET'])
 def download_single_file_csv(filename):
     file_path = resolve_uploaded_file_path(filename)
@@ -148,6 +248,10 @@ def download_single_file_csv(filename):
     if result.get('status') != 'success':
         return jsonify({'error': result.get('message', 'Analysis failed')}), 500
 
+    # If the user adjusted the threshold, use that ratio in the CSV
+    override_ratio = request.args.get('fibrosis_ratio')
+    fibrosis_ratio = float(override_ratio) if override_ratio is not None else result.get('fibrosis_ratio', '')
+
     membership_scores = result.get('membership_scores') or {}
 
     csv_buffer = io.StringIO()
@@ -155,7 +259,7 @@ def download_single_file_csv(filename):
     writer.writerow(['image_name', 'percentage', 'cluster_label', 'None', 'Perisinusoidal', 'Bridging', 'Cirrosis'])
     writer.writerow([
         os.path.basename(file_path),
-        result.get('fibrosis_ratio', ''),
+        fibrosis_ratio,
         result.get('cluster_label', ''),
         membership_scores.get('None', result.get('None', '')),
         membership_scores.get('Perisinusoidal', result.get('Perisinusoidal', '')),
