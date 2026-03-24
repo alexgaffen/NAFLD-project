@@ -101,7 +101,7 @@ const ImageSubmission = () => {
         }
     }, [analysisResult]);
 
-    // Debounced rethreshold call (global â€” resets local edits)
+    // Debounced rethreshold call (global — resets local edits)
     const handleThresholdChange = useCallback((value) => {
         setUserThreshold(value);
         if (rethresholdTimer.current) clearTimeout(rethresholdTimer.current);
@@ -394,7 +394,7 @@ const ImageSubmission = () => {
     const handleFile = useCallback(async (file) => {
         if (!file) return;
 
-        // Enforce 50MB limit on standard flat images â€” large slides must use SVS or TIF
+        // Enforce 50MB limit on standard flat images — large slides must use SVS or TIF
         const isFlatImage = file.name.match(/\.(jpe?g|png|bmp)$/i);
         if (isFlatImage && file.size > MAX_FLAT_IMAGE_SIZE) {
             setErrorMessage(`Standard images (JPG/PNG/BMP) must be under 50 MB. For whole-slide images, use SVS or TIF format.`);
@@ -558,13 +558,13 @@ const ImageSubmission = () => {
         link.remove();
     };
 
-    // Only show extent after full analysis â€” preview images still appear immediately
+    // Only show extent after full analysis — preview images still appear immediately
     const fibrosisRatio = analysisResult?.fibrosis_ratio;
     // Simple statuses for the UI label
     const pipelineStatus = isAnalyzing
-        ? 'Running Diagnosisâ€¦'
+        ? 'Running Diagnosis…'
         : isUploading
-        ? `Uploading${uploadProgress > 0 && uploadProgress < 100 ? 'â€¦ ' + uploadProgress + '%' : 'â€¦'}`
+        ? `Uploading${uploadProgress > 0 && uploadProgress < 100 ? '… ' + uploadProgress + '%' : '…'}`
         : null;
 
     const renderRadarChart = (data) => {
@@ -686,21 +686,21 @@ const ImageSubmission = () => {
                         <div className="magnifier-sidebar">
                             <span className="mag-sidebar-label">Zoom</span>
                             <div className="mag-zoom-bar">
-                                <span className="mag-arrow-hint">â–²</span>
+                                <span className="mag-arrow-hint">▲</span>
                                 <div className="mag-zoom-track">
                                     <div className="mag-zoom-fill" style={{ height: `${zoomFraction * 100}%` }} />
                                 </div>
-                                <span className="mag-arrow-hint">â–¼</span>
+                                <span className="mag-arrow-hint">▼</span>
                             </div>
                         </div>
                     </div>
                     {/* Bottom bar: area adjustment */}
                     <div className="mag-bottom-bar">
-                        <span className="mag-arrow-hint">â—€</span>
+                        <span className="mag-arrow-hint">◀</span>
                         <div className="mag-adj-track">
                             <div className="mag-adj-center" />
                         </div>
-                        <span className="mag-arrow-hint">â–¶</span>
+                        <span className="mag-arrow-hint">▶</span>
                         <span className="mag-bottom-label">Area Adj.</span>
                     </div>
                 </div>
@@ -710,13 +710,13 @@ const ImageSubmission = () => {
 
     return (
         <div className="main-grid">
-            {/* Help button â€” fixed top-right */}
+            {/* Help button — fixed top-right */}
             <button className="help-btn" onClick={() => setShowHelp(true)} title="Help &amp; Keybindings">?</button>
 
-            {/* â”€â”€ Left: images + extent description â”€â”€ */}
+            {/* ── Left: images + extent description ── */}
             <div className="images-col">
                 <div className="comparison-grid">
-                    {/* Original â€” with tile overlay during analysis */}
+                    {/* Original — with tile overlay during analysis */}
                     <div
                         className={`img-panel drop-zone ${isDragging ? 'drag-over' : ''} ${magnifier && displayedResult?.original_image ? 'magnifier-active' : ''} ${isBusy ? 'busy' : ''}`}
                         onDragOver={handleDragOver}
@@ -732,7 +732,7 @@ const ImageSubmission = () => {
                         ) : image ? (
                             image.name.match(/\.(tif|tiff|svs)$/i) ? (
                                 <div className="placeholder-text" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', alignItems: 'center' }}>
-                                    <span style={{ fontSize: '1.5rem' }}>âŒ›</span>
+                                    <span style={{ fontSize: '1.5rem' }}>⌛</span>
                                     <span>{image.name}</span>
                                     <span style={{ fontSize: '0.75rem' }}>Generating preview...</span>
                                 </div>
@@ -748,7 +748,7 @@ const ImageSubmission = () => {
                         ) : (
                             <div className="placeholder-text">
                                 <div style={{ color: '#ffffff' }}>Click or Drop to Upload</div>
-                                <div style={{ fontSize: '0.7rem', marginTop: '0.4rem', color: '#ffffff' }}>SVS / TIF â€” any size &nbsp;Â·&nbsp; JPG / PNG / BMP â€” max 50 MB</div>
+                                <div style={{ fontSize: '0.7rem', marginTop: '0.4rem', color: '#ffffff' }}>SVS / TIF — any size &nbsp;·&nbsp; JPG / PNG / BMP — max 50 MB</div>
                             </div>
                         )}
 
@@ -759,13 +759,13 @@ const ImageSubmission = () => {
                         {/* Filename & change message at bottom of frame */}
                         {image && (
                             <div className="img-panel-footer">
-                                <span className="img-panel-filename">ðŸ“„ {image.name}</span>
+                                <span className="img-panel-filename">📄 {image.name}</span>
                                 {!isBusy && <span className="img-panel-change" onClick={handleClick}>Click or drop to change</span>}
-                                {isAnalyzing && <button className="cancel-diagnosis-btn" onClick={() => window.location.reload()}>âœ• Cancel Diagnosis</button>}
+                                {isAnalyzing && <button className="cancel-diagnosis-btn" onClick={() => window.location.reload()}>✕ Cancel Diagnosis</button>}
                             </div>
                         )}
 
-                        {/* Tile grid overlay â€” positioned over the actual image content only */}
+                        {/* Tile grid overlay — positioned over the actual image content only */}
                         {showTileOverlay && imgContentRect && (
                             <div className="tile-overlay" style={{
                                 left: imgContentRect.left,
@@ -823,7 +823,7 @@ const ImageSubmission = () => {
                         {magnifier && displayedMaskSrc && <div className="magnifier-dim" />}
                         {displayedMaskSrc && (
                             <button className="download-mask-btn" onClick={handleDownloadMask} title="Download fibrosis mask">
-                                â¬‡ Save Mask
+                                ⬇ Save Mask
                             </button>
                         )}
                     </div>
@@ -833,22 +833,22 @@ const ImageSubmission = () => {
                 <div className="extent-description">
                     {magnifier && displayedResult?.original_image ? (
                         <div className="binding-indicators">
-                            <p className="magnifier-area-msg">â—€ â–¶ magnifying glass threshold adjustments apply to the area under observation only</p>
+                            <p className="magnifier-area-msg">◀ ▶ magnifying glass threshold adjustments apply to the area under observation only</p>
                             <div className="binding-row">
                                 <div className="binding-group">
-                                    <span className="binding-key binding-key-yellow">â–²</span>
+                                    <span className="binding-key binding-key-yellow">▲</span>
                                     <span className="binding-label">Zoom In</span>
                                 </div>
                                 <div className="binding-group">
-                                    <span className="binding-key binding-key-yellow">â–¼</span>
+                                    <span className="binding-key binding-key-yellow">▼</span>
                                     <span className="binding-label">Zoom Out</span>
                                 </div>
                                 <div className="binding-group">
-                                    <span className="binding-key">â—€</span>
-                                    <span className="binding-label">âˆ’ Threshold</span>
+                                    <span className="binding-key">◀</span>
+                                    <span className="binding-label">− Threshold</span>
                                 </div>
                                 <div className="binding-group">
-                                    <span className="binding-key">â–¶</span>
+                                    <span className="binding-key">▶</span>
                                     <span className="binding-label">+ Threshold</span>
                                 </div>
                                 <div className="binding-group">
@@ -883,7 +883,7 @@ const ImageSubmission = () => {
                 {errorMessage && <p className="error-text">{errorMessage}</p>}
             </div>
 
-            {/* â”€â”€ Right: diagnosis report â”€â”€ */}
+            {/* ── Right: diagnosis report ── */}
             <aside className="report-col">
                 <div className="report-header">
                     <h2 className="report-title">DIAGNOSIS REPORT</h2>
@@ -892,11 +892,11 @@ const ImageSubmission = () => {
                         onClick={handleDownloadCsv}
                         disabled={!uploadedFilename || isUploading || isAnalyzing}
                     >
-                        â¬‡ Download CSV
+                        ⬇ Download CSV
                     </button>
                 </div>
 
-                {/* Patch progress card â€” only visible during SVS/TIF analysis */}
+                {/* Patch progress card — only visible during SVS/TIF analysis */}
                 {patchProgress && isAnalyzing && (
                     <div className="report-card" style={{ borderColor: '#4ecdc4' }}>
                         <p className="report-label" style={{ color: '#4ecdc4', fontWeight: 600 }}>Patch Analysis in Progress</p>
@@ -911,7 +911,7 @@ const ImageSubmission = () => {
                             <span>{patchProgress.tissue_patches} tissue patches found</span>
                         </div>
                         <p style={{ fontSize: '0.72rem', color: '#fff', marginTop: '0.3rem' }}>
-                            Processing 256Ã—256 patches, skipping blank areasâ€¦
+                            Processing 256×256 patches, skipping blank areas…
                         </p>
                     </div>
                 )}
@@ -927,13 +927,13 @@ const ImageSubmission = () => {
                     <p className="report-value">
                         {fibrosisRatio !== undefined ? `${Number(fibrosisRatio).toFixed(2)}%` : '--'}
                         {adjustedRatio !== null && (
-                            <span className="adjusted-ratio"> â†’ {Number(adjustedRatio).toFixed(2)}%</span>
+                            <span className="adjusted-ratio"> → {Number(adjustedRatio).toFixed(2)}%</span>
                         )}
                     </p>
                     {hasLocalEdits && (
                         <div className="local-edits-badge">
-                            <span>â–  Area adjustments applied</span>
-                            <button className="undo-area-btn" onClick={handleUndoArea} title="Undo last area modification (Ctrl+Z)">â†© Undo Step</button>
+                            <span>■ Area adjustments applied</span>
+                            <button className="undo-area-btn" onClick={handleUndoArea} title="Undo last area modification (Ctrl+Z)">↩ Undo Step</button>
                         </div>
                     )}
                     {autoThreshold !== null && (
@@ -941,7 +941,7 @@ const ImageSubmission = () => {
                             <label className="threshold-label">
                                 Baseline Threshold
                                 <span className="threshold-value">{Number(userThreshold).toFixed(3)}</span>
-                                {isRethresholding && <span className="threshold-loading">âŸ³</span>}
+                                {isRethresholding && <span className="threshold-loading">⟳</span>}
                             </label>
                             <input
                                 type="range"
@@ -985,7 +985,7 @@ const ImageSubmission = () => {
                     )}
                 </div>
 
-                {/* FCM Membership Radar Chart â€” 4 categories + spectrum note */}
+                {/* FCM Membership Radar Chart — 4 categories + spectrum note */}
                 {analysisResult && (analysisResult.None !== undefined) && (
                     <div className="report-card" style={{ border: '1px solid #4ecdc4' }}>
                         <p className="report-label">FCM Cluster Membership</p>
@@ -1033,7 +1033,7 @@ const ImageSubmission = () => {
             {showHelp && (
                 <div className="confirm-overlay" onClick={() => setShowHelp(false)}>
                     <div className="help-modal" onClick={(e) => e.stopPropagation()}>
-                        <button className="help-close" onClick={() => setShowHelp(false)}>âœ•</button>
+                        <button className="help-close" onClick={() => setShowHelp(false)}>✕</button>
                         <h2 className="help-title">How to Use AI-Fibrosis</h2>
 
                         <div className="help-section">
@@ -1050,8 +1050,8 @@ const ImageSubmission = () => {
                             <h3>Magnifying Glass & Fine Adjustments</h3>
                             <p>Hover over the original image to activate the magnifying glass. Use arrow keys to zoom and adjust the threshold for just the area under observation:</p>
                             <ul className="help-bindings">
-                                <li><kbd>â–²</kbd> <kbd>â–¼</kbd> Zoom in / out</li>
-                                <li><kbd>â—€</kbd> <kbd>â–¶</kbd> Decrease / increase area threshold</li>
+                                <li><kbd>▲</kbd> <kbd>▼</kbd> Zoom in / out</li>
+                                <li><kbd>◀</kbd> <kbd>▶</kbd> Decrease / increase area threshold</li>
                                 <li><kbd>Ctrl+R</kbd> Reset observed area to original threshold</li>
                                 <li><kbd>Ctrl+Z</kbd> Undo all increments made to the last modified area</li>
                                 <li><kbd>Esc</kbd> Close overlays</li>
