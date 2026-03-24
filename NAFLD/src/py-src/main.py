@@ -22,7 +22,12 @@ import threading
 
 from auth import auth_bp, init_db, login_required
 
-app = Flask(__name__)
+# Serve the React build in production when NAFLD_STATIC_DIR is set
+_static_dir = os.environ.get('NAFLD_STATIC_DIR')
+if _static_dir:
+    app = Flask(__name__, static_folder=_static_dir, static_url_path='')
+else:
+    app = Flask(__name__)
 CORS(app, expose_headers=['Content-Disposition'],
      allow_headers=['Content-Type', 'Authorization'])
 
@@ -497,6 +502,15 @@ def full_file_upload():
     # print(f"res num: {resumable_chunk_number} total: {total_chunks}")
     return jsonify({"status": "Chunk upload successful"}), 200
     
+
+# Catch-all: serve React index.html for client-side routing (production only)
+if _static_dir:
+    @app.route('/', defaults={'path': ''})
+    @app.route('/<path:path>')
+    def serve_react(path):
+        if path and os.path.exists(os.path.join(app.static_folder, path)):
+            return app.send_static_file(path)
+        return app.send_static_file('index.html')
 
 
 if __name__ == "__main__":
