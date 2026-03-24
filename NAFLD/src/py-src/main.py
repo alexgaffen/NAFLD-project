@@ -382,15 +382,18 @@ def upload_largefile():
     resumable_chunk_number = int(request.form['resumableChunkNumber'])
     total_chunks = int(request.form['resumableTotalChunks'])
 
-    # On first chunk, generate a timestamped safe name (same logic as /upload)
-    if resumable_chunk_number == 1 and resumable_filename not in _chunked_upload_names:
-        original = secure_filename(resumable_filename)
-        root, ext = os.path.splitext(original)
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-        _chunked_upload_names[resumable_filename] = f"{root}_{timestamp}{ext.lower()}"
-
-    safe_name = _chunked_upload_names.get(resumable_filename, secure_filename(resumable_filename))
+    # Build a deterministic safe name from the original filename + total chunks
+    # so that every gunicorn worker resolves the same path for a given upload.
+    import hashlib
+    original = secure_filename(resumable_filename)
+    root, ext = os.path.splitext(original)
+    tag = hashlib.md5(f"{resumable_filename}:{total_chunks}".encode()).hexdigest()[:8]
+    safe_name = f"{root}_{tag}{ext.lower()}"
     full_file_path = os.path.join(UPLOAD_FOLDER, safe_name)
+
+    # On first chunk, start fresh in case of re-upload
+    if resumable_chunk_number == 1 and os.path.exists(full_file_path):
+        os.remove(full_file_path)
 
     try:
         with open(full_file_path, 'ab') as f:
@@ -402,8 +405,6 @@ def upload_largefile():
     print(f"Chunk {resumable_chunk_number}/{total_chunks} for {safe_name}")
 
     if resumable_chunk_number == total_chunks:
-        # Clean up tracking dict
-        _chunked_upload_names.pop(resumable_filename, None)
         # Clear analysis cache — new image uploaded
         _analysis_cache.clear()
         return jsonify({

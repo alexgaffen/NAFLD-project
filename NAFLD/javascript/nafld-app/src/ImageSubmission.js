@@ -1,4 +1,4 @@
-﻿import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 
 const API_BASE = process.env.REACT_APP_API_URL || "http://127.0.0.1:5000";
 
@@ -345,9 +345,9 @@ const ImageSubmission = () => {
     }, [magnifier, autoThreshold, getMagnifierRegion, handleLocalDeltaChange, handleResetArea, handleUndoArea, showHelp, showResetConfirm, handleConfirmNo]);
 
     const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB per chunk
-    const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024; // 10 MB â€” use chunking above this
+    const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024; // 10 MB -- use chunking above this
 
-    // â”€â”€ Chunked upload for large files (SVS, big TIF) â”€â”€
+    // ---- Chunked upload for large files (SVS, big TIF) ----
     const uploadChunked = async (file) => {
         const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
         let serverFilename = null;
@@ -377,7 +377,7 @@ const ImageSubmission = () => {
         return serverFilename;
     };
 
-    // â”€â”€ Simple upload for small files â”€â”€
+    // ---- Simple upload for small files ----
     const uploadSimple = async (file) => {
         const formData = new FormData();
         formData.append('file', file);
