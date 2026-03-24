@@ -1,5 +1,22 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
+/** Return an Authorization header object using the stored JWT, or empty object. */
+const authHeader = () => {
+    const token = sessionStorage.getItem("access_token");
+    return token ? { Authorization: `Bearer ${token}` } : {};
+};
+
+/** If a response is 401, clear session and reload to show login screen. */
+const handleAuthError = (res) => {
+    if (res.status === 401) {
+        sessionStorage.removeItem("access_token");
+        sessionStorage.removeItem("refresh_token");
+        sessionStorage.removeItem("username");
+        window.location.reload();
+    }
+    return res;
+};
+
 const ImageSubmission = () => {
     const [image, setSelectedImage] = useState(null);
     const [uploadedFilename, setUploadedFilename] = useState("");
@@ -91,7 +108,8 @@ const ImageSubmission = () => {
             setIsRethresholding(true);
             try {
                 const res = await fetch(
-                    `http://127.0.0.1:5000/rethreshold/${encodeURIComponent(uploadedFilename)}?threshold=${value}`
+                    `http://127.0.0.1:5000/rethreshold/${encodeURIComponent(uploadedFilename)}?threshold=${value}`,
+                    { headers: authHeader() }
                 );
                 if (res.ok) {
                     const data = await res.json();
@@ -185,7 +203,8 @@ const ImageSubmission = () => {
                     x2: region.x2, y2: region.y2,
                 });
                 const res = await fetch(
-                    `http://127.0.0.1:5000/rethreshold-area/${encodeURIComponent(uploadedFilename)}?${params}`
+                    `http://127.0.0.1:5000/rethreshold-area/${encodeURIComponent(uploadedFilename)}?${params}`,
+                    { headers: authHeader() }
                 );
                 if (res.ok) {
                     const data = await res.json();
@@ -230,7 +249,8 @@ const ImageSubmission = () => {
                 x2: region.x2, y2: region.y2,
             });
             const res = await fetch(
-                `http://127.0.0.1:5000/reset-area/${encodeURIComponent(uploadedFilename)}?${params}`
+                `http://127.0.0.1:5000/reset-area/${encodeURIComponent(uploadedFilename)}?${params}`,
+                { headers: authHeader() }
             );
             if (res.ok) {
                 const data = await res.json();
@@ -252,7 +272,8 @@ const ImageSubmission = () => {
         setIsRethresholding(true);
         try {
             const res = await fetch(
-                `http://127.0.0.1:5000/undo-area/${encodeURIComponent(uploadedFilename)}`
+                `http://127.0.0.1:5000/undo-area/${encodeURIComponent(uploadedFilename)}`,
+                { headers: authHeader() }
             );
             if (res.ok) {
                 const data = await res.json();
@@ -340,7 +361,7 @@ const ImageSubmission = () => {
             form.append('resumableChunkNumber', String(i + 1));
             form.append('resumableTotalChunks', String(totalChunks));
 
-            const res = await fetch('http://127.0.0.1:5000/largefile', { method: 'POST', body: form });
+            const res = await fetch('http://127.0.0.1:5000/largefile', { method: 'POST', headers: authHeader(), body: form }).then(handleAuthError);
             if (!res.ok) throw new Error(`Chunk ${i + 1}/${totalChunks} failed: ${await res.text()}`);
 
             const data = await res.json();
@@ -358,7 +379,7 @@ const ImageSubmission = () => {
     const uploadSimple = async (file) => {
         const formData = new FormData();
         formData.append('file', file);
-        const res = await fetch('http://127.0.0.1:5000/upload', { method: 'POST', body: formData });
+        const res = await fetch('http://127.0.0.1:5000/upload', { method: 'POST', headers: authHeader(), body: formData }).then(handleAuthError);
         if (!res.ok) throw new Error(`Upload failed: ${await res.text()}`);
         const data = await res.json();
         if (!data.filename) throw new Error('Upload succeeded but no filename returned.');
@@ -408,7 +429,7 @@ const ImageSubmission = () => {
 
             if (isSvsTif) {
                 // Large slides: fetch a quick preview so the user sees something while patches process
-                const previewResponse = await fetch(`http://127.0.0.1:5000/preview/${encodeURIComponent(filename)}`);
+                const previewResponse = await fetch(`http://127.0.0.1:5000/preview/${encodeURIComponent(filename)}`, { headers: authHeader() });
                 if (previewResponse.ok) {
                     setPreviewResult(await previewResponse.json());
                 }
@@ -419,7 +440,7 @@ const ImageSubmission = () => {
                 setPatchProgress(null);
 
                 const analyzeResult = await new Promise((resolve, reject) => {
-                    const evtSource = new EventSource(`http://127.0.0.1:5000/analyze-stream/${encodeURIComponent(filename)}`);
+                    const evtSource = new EventSource(`http://127.0.0.1:5000/analyze-stream/${encodeURIComponent(filename)}?token=${encodeURIComponent(sessionStorage.getItem('access_token') || '')}`);
                     evtSource.onmessage = (event) => {
                         try {
                             const msg = JSON.parse(event.data);
@@ -462,7 +483,7 @@ const ImageSubmission = () => {
                 setIsAnalyzing(true);
                 setPatchProgress(null);
 
-                const analyzeResponse = await fetch(`http://127.0.0.1:5000/analyze/${encodeURIComponent(filename)}`);
+                const analyzeResponse = await fetch(`http://127.0.0.1:5000/analyze/${encodeURIComponent(filename)}`, { headers: authHeader() });
                 if (!analyzeResponse.ok) throw new Error(`Analyze failed: ${await analyzeResponse.text()}`);
                 const result = await analyzeResponse.json();
                 setPreviewResult(result);    // Images appear via displayedResult
@@ -501,7 +522,7 @@ const ImageSubmission = () => {
             if (adjustedRatio !== null) {
                 csvUrl += `?fibrosis_ratio=${adjustedRatio}`;
             }
-            const response = await fetch(csvUrl);
+            const response = await fetch(csvUrl, { headers: authHeader() });
             if (!response.ok) throw new Error(`CSV download failed: ${await response.text()}`);
             const blob = await response.blob();
             const disposition = response.headers.get('Content-Disposition');
@@ -547,11 +568,10 @@ const ImageSubmission = () => {
     const renderRadarChart = (data) => {
         if (!data) return null;
         const cx = 150, cy = 150, R = 80;
-        const N = 5;
+        const N = 4;
         const cats = [
             { key: 'None',            label: 'None',            sub: 'F0' },
             { key: 'Perisinusoidal',  label: 'Perisinusoidal',  sub: 'F1' },
-            { key: 'Periportal',      label: 'Periportal',      sub: 'F2' },
             { key: 'Bridging',        label: 'Bridging',        sub: 'F3' },
             { key: 'Cirrosis',        label: 'Cirrhosis',       sub: 'F4' },
         ];
@@ -889,7 +909,7 @@ const ImageSubmission = () => {
                             <span>{patchProgress.tissue_patches} tissue patches found</span>
                         </div>
                         <p style={{ fontSize: '0.72rem', color: '#fff', marginTop: '0.3rem' }}>
-                            Processing 512×512 patches, skipping blank areas…
+                            Processing 256×256 patches, skipping blank areas…
                         </p>
                     </div>
                 )}
@@ -924,8 +944,8 @@ const ImageSubmission = () => {
                             <input
                                 type="range"
                                 className="threshold-slider"
-                                min={Math.max(autoThreshold - 1.5, 0)}
-                                max={autoThreshold + 1.5}
+                                min={Math.max(autoThreshold - 5, 0)}
+                                max={autoThreshold + 5}
                                 step={0.01}
                                 value={userThreshold}
                                 onChange={(e) => {
@@ -949,7 +969,7 @@ const ImageSubmission = () => {
                                         setAdjustedMask(null);
                                         setHasLocalEdits(false);
                                         setDeltaMap(null);
-                                        fetch(`http://127.0.0.1:5000/rethreshold/${encodeURIComponent(uploadedFilename)}?threshold=${autoThreshold}`)
+                                        fetch(`http://127.0.0.1:5000/rethreshold/${encodeURIComponent(uploadedFilename)}?threshold=${autoThreshold}`, { headers: authHeader() })
                                             .catch(() => {});
                                     };
                                     if (hasLocalEdits) {
@@ -963,14 +983,14 @@ const ImageSubmission = () => {
                     )}
                 </div>
 
-                {/* FCM Membership Radar Chart — 5 categories + spectrum note */}
+                {/* FCM Membership Radar Chart — 4 categories + spectrum note */}
                 {analysisResult && (analysisResult.None !== undefined) && (
                     <div className="report-card" style={{ border: '1px solid #4ecdc4' }}>
                         <p className="report-label">FCM Cluster Membership</p>
                         {renderRadarChart(analysisResult)}
                         <p style={{ fontSize: '0.78rem', color: '#fff', lineHeight: 1.5, marginTop: '0.25rem', borderTop: '1px solid #253545', paddingTop: '0.4rem' }}>
                             <strong style={{ color: '#f7b731' }}>Gradual Spectrum:</strong>{' '}
-                            Fibrosis stages (F0–F4) overlap continuously. FCM assigns probabilistic membership rather than a hard category.
+                            Fibrosis categories overlap continuously. FCM assigns probabilistic membership across 4 clusters rather than a hard category.
                         </p>
                     </div>
                 )}

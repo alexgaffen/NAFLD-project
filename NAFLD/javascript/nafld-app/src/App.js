@@ -1,6 +1,23 @@
+import { useState, useCallback } from "react";
 import ImageSubmission from "./ImageSubmission";
+import Login from "./Login";
 
 function App() {
+  const [user, setUser] = useState(() => sessionStorage.getItem("username"));
+
+  const handleLogin = useCallback((username) => setUser(username), []);
+
+  const handleLogout = useCallback(() => {
+    sessionStorage.removeItem("access_token");
+    sessionStorage.removeItem("refresh_token");
+    sessionStorage.removeItem("username");
+    setUser(null);
+  }, []);
+
+  if (!user) {
+    return <Login onLogin={handleLogin} />;
+  }
+
   return (
     <div className="app-root">
       {/* ── Top bar ── */}
@@ -15,6 +32,10 @@ function App() {
         <span className="top-bar-pipeline">
           VGG16 FEATURE EXTRACTION → FUZZY C-MEANS CLUSTERING
         </span>
+        <div className="user-badge">
+          <span>👤 {user}</span>
+          <button className="logout-btn" onClick={handleLogout}>Sign Out</button>
+        </div>
       </header>
 
       {/* ── Main content ── */}

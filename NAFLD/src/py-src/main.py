@@ -19,8 +19,18 @@ from nafld import process_all_images
 import json
 import queue
 import threading
+
+from auth import auth_bp, init_db, login_required
+
 app = Flask(__name__)
-CORS(app, expose_headers=['Content-Disposition'])
+CORS(app, expose_headers=['Content-Disposition'],
+     allow_headers=['Content-Type', 'Authorization'])
+
+# Initialise user database on startup
+init_db()
+
+# Register auth blueprint (provides /login, /refresh, /me)
+app.register_blueprint(auth_bp)
 
 # Allow uploads up to 2 GB (chunked uploads bypass this but regular /upload needs it)
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2 GB
@@ -42,6 +52,7 @@ _analysis_cache = {}
 # CORS(app, resources={r"/home": {"origins": "localhost:3000"}})
 
 @app.route("/analyze/<filename>", methods=['GET'])
+@login_required
 def analyze_file(filename):
     print(f"Analyzing {filename}...")
 
@@ -69,6 +80,7 @@ def _is_patchable(file_path):
 
 
 @app.route("/analyze-stream/<filename>", methods=['GET'])
+@login_required
 def analyze_file_stream(filename):
     """SSE endpoint — streams patch progress then the final result."""
     file_path = resolve_uploaded_file_path(filename)
@@ -122,6 +134,7 @@ def analyze_file_stream(filename):
 
 
 @app.route("/preview/<filename>", methods=['GET'])
+@login_required
 def preview_file(filename):
     print(f"Previewing {filename}...")
 
@@ -135,6 +148,7 @@ def preview_file(filename):
 
 
 @app.route("/rethreshold/<filename>", methods=['GET'])
+@login_required
 def rethreshold_file(filename):
     """Apply a user-chosen threshold to cached deconvolution data."""
     thresh_str = request.args.get('threshold')
@@ -160,6 +174,7 @@ def rethreshold_file(filename):
 
 
 @app.route("/rethreshold-area/<filename>", methods=['GET'])
+@login_required
 def rethreshold_area_file(filename):
     """Apply a relative threshold delta to a specific region."""
     try:
@@ -187,6 +202,7 @@ def rethreshold_area_file(filename):
 
 
 @app.route("/reset-area/<filename>", methods=['GET'])
+@login_required
 def reset_area_file(filename):
     """Reset threshold delta to zero in a specific region."""
     try:
@@ -215,6 +231,7 @@ def reset_area_file(filename):
 
 
 @app.route("/undo-area/<filename>", methods=['GET'])
+@login_required
 def undo_area_file(filename):
     """Undo the last area modification."""
     result = undo_area(filename)
@@ -235,6 +252,7 @@ def undo_area_file(filename):
 
 
 @app.route("/download-single/<filename>", methods=['GET'])
+@login_required
 def download_single_file_csv(filename):
     file_path = resolve_uploaded_file_path(filename)
     if not file_path:
@@ -319,6 +337,7 @@ def home():
 
 
 @app.route("/upload", methods =['POST'])
+@login_required
 def upload_file():
     if 'file' not in request.files:
         return jsonify({'error': 'No file part in request'}), 400
@@ -351,6 +370,7 @@ def upload_file():
 _chunked_upload_names = {}
 
 @app.route("/largefile", methods=['POST'])
+@login_required
 def upload_largefile():
     chunk = request.files['file']
     resumable_filename = request.form['resumableFilename']

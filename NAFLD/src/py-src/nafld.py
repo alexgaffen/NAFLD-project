@@ -66,11 +66,12 @@ vgg_model=VGG16(weights='imagenet',include_top=False)
 with open(os.path.join(model_save_path,'pca_model.pkl'), 'rb') as file:
     pca_model = pickle.load(file)
 
-with open(os.path.join(model_save_path, 'fixed_model_params.pkl'), 'rb') as file:
+with open(os.path.join(model_save_path, 'final_merged_params.pkl'), 'rb') as file:
     model_params = pickle.load(file)
 
 centroids = model_params['centroids']
 best_m = model_params.get('best_m', 1.15)  # K-Means-initialized FCM with strict fuzziness
+cluster_map = model_params.get('cluster_map', None)  # e.g. {0:0, 1:1, 2:2, 3:3, 4:3}
 #8f7972 -> 143,121,114
 # 0.560,0.474,0.447
 
@@ -92,12 +93,12 @@ stain_matrix = np.array([[0.148, 0.722, 0.618],
 
 cluster_lookup_table = {
     0: 'Category A: None',
-    1: 'Category B: Perisinusoidal/Portal',
-    2: 'Category C: Bridging',
-    3: 'Category D: Cirrosis',
+    1: 'Category C: Bridging',
+    2: 'Category D: Cirrosis',
+    3: 'Category B: Perisinusoidal/Portal',
 }
 
-membership_column_names = ['None', 'Perisinusoidal', 'Bridging', 'Cirrosis']
+membership_column_names = ['None', 'Bridging', 'Cirrosis', 'Perisinusoidal']
 
 
 #Helper functions
@@ -474,6 +475,13 @@ def predict_cluster_pil(pil_image, already_filtered=False, original_pil=None):
     features = extract_features(feature_source)
     reduc_features = pca_model.transform([features])
     u, _, _, _, _, _ = cmeans_predict(reduc_features.T, centroids, m=best_m, error=0.1, maxiter=100)
+    # Merge memberships according to cluster_map (e.g. fold cluster 4 into 3)
+    if cluster_map is not None:
+        n_groups = max(cluster_map.values()) + 1
+        u_merged = np.zeros((n_groups, u.shape[1]))
+        for src, dst in cluster_map.items():
+            u_merged[dst] += u[src]
+        u = u_merged
     cluster_label = np.argmax(u, axis=0)
     return u, cluster_label, percentage
 
@@ -604,6 +612,12 @@ def predict_cluster(image_path, stain_matrix=None):
     features = extract_features(original_pil)
     reduc_features = pca_model.transform([features])
     u, _, _, _, _, _ = cmeans_predict(reduc_features.T, centroids, m=best_m, error=0.1, maxiter=100)
+    if cluster_map is not None:
+        n_groups = max(cluster_map.values()) + 1
+        u_merged = np.zeros((n_groups, u.shape[1]))
+        for src, dst in cluster_map.items():
+            u_merged[dst] += u[src]
+        u = u_merged
     cluster_label = np.argmax(u, axis=0)
     return u, cluster_label, percentage
 
@@ -620,7 +634,7 @@ def process_images_in_folder(folder_path, predict_cluster_func):
     # results.append(["16E.tif",1.472829861111111,"Category C: Bridging",0.03421226000923161,0.10285556764417932,0.7324887669357235,0.1304434054108655])
     # results.append(["61.7.tif",0.0,"Category A: None",0.86083308458,0.0418876622792983,4.121940722792983e-31,0.0998885441976844])
 
-    df = pd.DataFrame(results, columns=['image_name', 'percentage', 'cluster_label','None','Perisinusoidal','Bridging','Cirrosis'])
+    df = pd.DataFrame(results, columns=['image_name', 'percentage', 'cluster_label','None','Bridging','Cirrosis','Perisinusoidal'])
     # df = pd.DataFrame(results, columns=['image_name', 'percentage', 'cluster_label')
     return df
 
@@ -701,7 +715,7 @@ def _select_slide_level(slide, max_dim=8192):
     return len(slide.level_dimensions) - 1
 
 
-def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=8192, progress_callback=None):
+def analyze_single_file_patched(file_path, patch_size=256, max_processing_dim=8192, progress_callback=None):
     """
     Patch-based analysis for SVS (and large TIF) files.
 
@@ -824,6 +838,15 @@ def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=81
                 ph, pw_actual = patch.shape[:2]
 
                 if ph < 32 or pw_actual < 32:
+                    continue
+
+                # Skip tiles that are overwhelmingly white (background)
+                gray = np.mean(patch.astype(np.float32), axis=2)
+                if np.sum(gray > 220) / gray.size >= 0.75:
+                    if progress_callback:
+                        progress_callback(current_tile, total_tiles, patch_count,
+                                          grid_rows=num_rows, grid_cols=num_cols,
+                                          tile_row=ri, tile_col=ci, is_tissue=False)
                     continue
 
                 # Extract this tile's mask for VGG16

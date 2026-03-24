@@ -317,19 +317,9 @@ html, body, #root {
     rgba(78,205,196,0.18) 4px
   );
 }
-/* Shimmer sweep across every cell */
+/* Shimmer sweep — only applied to tissue tiles (see .tile-tissue::after) */
 .tile-cell::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    -45deg,
-    transparent 30%,
-    rgba(78,205,196,0.35) 50%,
-    transparent 70%
-  );
-  background-size: 300% 300%;
-  animation: tile-shimmer 2.4s ease-in-out infinite;
+  content: none;
 }
 /* Tissue tiles: brighter green tint */
 .tile-tissue {
@@ -337,6 +327,9 @@ html, body, #root {
   border: 1px solid rgba(78,205,196,0.35);
 }
 .tile-tissue::after {
+  content: '';
+  position: absolute;
+  inset: 0;
   background: linear-gradient(
     -45deg,
     transparent 30%,
@@ -352,14 +345,7 @@ html, body, #root {
   border: 1px solid rgba(37,53,69,0.4);
 }
 .tile-bg::after {
-  background: linear-gradient(
-    -45deg,
-    transparent 30%,
-    rgba(78,205,196,0.12) 50%,
-    transparent 70%
-  );
-  background-size: 300% 300%;
-  animation: tile-shimmer 2.4s ease-in-out infinite;
+  content: none;
 }
 /* Pending tiles: very dark */
 .tile-pending {
@@ -367,14 +353,7 @@ html, body, #root {
   border: 1px solid rgba(37,53,69,0.2);
 }
 .tile-pending::after {
-  background: linear-gradient(
-    -45deg,
-    transparent 30%,
-    rgba(78,205,196,0.08) 50%,
-    transparent 70%
-  );
-  background-size: 300% 300%;
-  animation: tile-shimmer 3s ease-in-out infinite;
+  content: none;
 }
 
 @keyframes tile-shimmer {
@@ -1020,3 +999,111 @@ html, body, #root {
   border-top: 1px solid #253545;
 }
 
+/* ── Login screen ── */
+.login-backdrop {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(ellipse at 50% 40%, #162536 0%, #0f1923 70%);
+  z-index: 9999;
+}
+.login-card {
+  width: 340px;
+  padding: 2.5rem 2rem 2rem;
+  background: #16222e;
+  border: 1px solid #253545;
+  border-radius: 1rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.9rem;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.55);
+}
+.login-icon {
+  font-size: 2.4rem;
+  margin-bottom: -0.3rem;
+}
+.login-title {
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: 3px;
+  color: #fff;
+}
+.login-subtitle {
+  font-size: 0.78rem;
+  color: #8a9bae;
+  margin-bottom: 0.4rem;
+}
+.login-label {
+  width: 100%;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #8a9bae;
+  letter-spacing: 0.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.login-input {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid #253545;
+  border-radius: 0.4rem;
+  background: #0f1923;
+  color: #fff;
+  font-size: 0.88rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.login-input:focus {
+  border-color: #4ecdc4;
+}
+.login-error {
+  width: 100%;
+  font-size: 0.78rem;
+  color: #e74c3c;
+  text-align: center;
+}
+.login-btn {
+  width: 100%;
+  padding: 0.65rem;
+  border: none;
+  border-radius: 0.4rem;
+  background: #4ecdc4;
+  color: #0f1923;
+  font-size: 0.88rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.2s;
+  margin-top: 0.2rem;
+}
+.login-btn:hover:not(:disabled) {
+  background: #3dbdb5;
+}
+.login-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.logout-btn {
+  background: none;
+  border: 1px solid #3a4f63;
+  border-radius: 0.3rem;
+  color: #8a9bae;
+  font-size: 0.72rem;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+}
+.logout-btn:hover {
+  color: #e74c3c;
+  border-color: #e74c3c;
+}
+.user-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  color: #8a9bae;
+}
