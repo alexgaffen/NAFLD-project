@@ -1,5 +1,7 @@
 import { useState } from "react";
 
+const API_BASE = process.env.REACT_APP_API_URL || "http://127.0.0.1:5000";
+
 const Login = ({ onLogin }) => {
     const [username, setUsername] = useState("");
     const [password, setPassword] = useState("");
@@ -17,7 +19,7 @@ const Login = ({ onLogin }) => {
 
         setIsLoading(true);
         try {
-            const res = await fetch("http://127.0.0.1:5000/login", {
+            const res = await fetch(`${API_BASE}/login`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ username: username.trim(), password }),

@@ -35,7 +35,7 @@ app.register_blueprint(auth_bp)
 # Allow uploads up to 2 GB (chunked uploads bypass this but regular /upload needs it)
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2 GB
 
-UPLOAD_FOLDER = 'C:\\Users\\alexg\\Documents\\NAFLDimages'
+UPLOAD_FOLDER = os.environ.get('NAFLD_UPLOAD_FOLDER', 'C:\\Users\\alexg\\Documents\\NAFLDimages')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'bmp', 'tif', 'tiff', 'svs'}
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -500,5 +500,5 @@ def full_file_upload():
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host=os.environ.get('FLASK_HOST', '127.0.0.1'), debug=True)
 

@@ -1,4 +1,6 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+﻿import { useState, useRef, useCallback, useEffect } from "react";
+
+const API_BASE = process.env.REACT_APP_API_URL || "http://127.0.0.1:5000";
 
 /** Return an Authorization header object using the stored JWT, or empty object. */
 const authHeader = () => {
@@ -99,7 +101,7 @@ const ImageSubmission = () => {
         }
     }, [analysisResult]);
 
-    // Debounced rethreshold call (global — resets local edits)
+    // Debounced rethreshold call (global â€” resets local edits)
     const handleThresholdChange = useCallback((value) => {
         setUserThreshold(value);
         if (rethresholdTimer.current) clearTimeout(rethresholdTimer.current);
@@ -108,7 +110,7 @@ const ImageSubmission = () => {
             setIsRethresholding(true);
             try {
                 const res = await fetch(
-                    `http://127.0.0.1:5000/rethreshold/${encodeURIComponent(uploadedFilename)}?threshold=${value}`,
+                    `${API_BASE}/rethreshold/${encodeURIComponent(uploadedFilename)}?threshold=${value}`,
                     { headers: authHeader() }
                 );
                 if (res.ok) {
@@ -203,7 +205,7 @@ const ImageSubmission = () => {
                     x2: region.x2, y2: region.y2,
                 });
                 const res = await fetch(
-                    `http://127.0.0.1:5000/rethreshold-area/${encodeURIComponent(uploadedFilename)}?${params}`,
+                    `${API_BASE}/rethreshold-area/${encodeURIComponent(uploadedFilename)}?${params}`,
                     { headers: authHeader() }
                 );
                 if (res.ok) {
@@ -249,7 +251,7 @@ const ImageSubmission = () => {
                 x2: region.x2, y2: region.y2,
             });
             const res = await fetch(
-                `http://127.0.0.1:5000/reset-area/${encodeURIComponent(uploadedFilename)}?${params}`,
+                `${API_BASE}/reset-area/${encodeURIComponent(uploadedFilename)}?${params}`,
                 { headers: authHeader() }
             );
             if (res.ok) {
@@ -272,7 +274,7 @@ const ImageSubmission = () => {
         setIsRethresholding(true);
         try {
             const res = await fetch(
-                `http://127.0.0.1:5000/undo-area/${encodeURIComponent(uploadedFilename)}`,
+                `${API_BASE}/undo-area/${encodeURIComponent(uploadedFilename)}`,
                 { headers: authHeader() }
             );
             if (res.ok) {
@@ -343,9 +345,9 @@ const ImageSubmission = () => {
     }, [magnifier, autoThreshold, getMagnifierRegion, handleLocalDeltaChange, handleResetArea, handleUndoArea, showHelp, showResetConfirm, handleConfirmNo]);
 
     const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB per chunk
-    const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024; // 10 MB — use chunking above this
+    const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024; // 10 MB â€” use chunking above this
 
-    // ── Chunked upload for large files (SVS, big TIF) ──
+    // â”€â”€ Chunked upload for large files (SVS, big TIF) â”€â”€
     const uploadChunked = async (file) => {
         const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
         let serverFilename = null;
@@ -361,7 +363,7 @@ const ImageSubmission = () => {
             form.append('resumableChunkNumber', String(i + 1));
             form.append('resumableTotalChunks', String(totalChunks));
 
-            const res = await fetch('http://127.0.0.1:5000/largefile', { method: 'POST', headers: authHeader(), body: form }).then(handleAuthError);
+            const res = await fetch(`${API_BASE}/largefile`, { method: 'POST', headers: authHeader(), body: form }).then(handleAuthError);
             if (!res.ok) throw new Error(`Chunk ${i + 1}/${totalChunks} failed: ${await res.text()}`);
 
             const data = await res.json();
@@ -375,11 +377,11 @@ const ImageSubmission = () => {
         return serverFilename;
     };
 
-    // ── Simple upload for small files ──
+    // â”€â”€ Simple upload for small files â”€â”€
     const uploadSimple = async (file) => {
         const formData = new FormData();
         formData.append('file', file);
-        const res = await fetch('http://127.0.0.1:5000/upload', { method: 'POST', headers: authHeader(), body: formData }).then(handleAuthError);
+        const res = await fetch(`${API_BASE}/upload`, { method: 'POST', headers: authHeader(), body: formData }).then(handleAuthError);
         if (!res.ok) throw new Error(`Upload failed: ${await res.text()}`);
         const data = await res.json();
         if (!data.filename) throw new Error('Upload succeeded but no filename returned.');
@@ -392,7 +394,7 @@ const ImageSubmission = () => {
     const handleFile = useCallback(async (file) => {
         if (!file) return;
 
-        // Enforce 50MB limit on standard flat images — large slides must use SVS or TIF
+        // Enforce 50MB limit on standard flat images â€” large slides must use SVS or TIF
         const isFlatImage = file.name.match(/\.(jpe?g|png|bmp)$/i);
         if (isFlatImage && file.size > MAX_FLAT_IMAGE_SIZE) {
             setErrorMessage(`Standard images (JPG/PNG/BMP) must be under 50 MB. For whole-slide images, use SVS or TIF format.`);
@@ -429,7 +431,7 @@ const ImageSubmission = () => {
 
             if (isSvsTif) {
                 // Large slides: fetch a quick preview so the user sees something while patches process
-                const previewResponse = await fetch(`http://127.0.0.1:5000/preview/${encodeURIComponent(filename)}`, { headers: authHeader() });
+                const previewResponse = await fetch(`${API_BASE}/preview/${encodeURIComponent(filename)}`, { headers: authHeader() });
                 if (previewResponse.ok) {
                     setPreviewResult(await previewResponse.json());
                 }
@@ -440,7 +442,7 @@ const ImageSubmission = () => {
                 setPatchProgress(null);
 
                 const analyzeResult = await new Promise((resolve, reject) => {
-                    const evtSource = new EventSource(`http://127.0.0.1:5000/analyze-stream/${encodeURIComponent(filename)}?token=${encodeURIComponent(sessionStorage.getItem('access_token') || '')}`);
+                    const evtSource = new EventSource(`${API_BASE}/analyze-stream/${encodeURIComponent(filename)}?token=${encodeURIComponent(sessionStorage.getItem('access_token') || '')}`);
                     evtSource.onmessage = (event) => {
                         try {
                             const msg = JSON.parse(event.data);
@@ -483,7 +485,7 @@ const ImageSubmission = () => {
                 setIsAnalyzing(true);
                 setPatchProgress(null);
 
-                const analyzeResponse = await fetch(`http://127.0.0.1:5000/analyze/${encodeURIComponent(filename)}`, { headers: authHeader() });
+                const analyzeResponse = await fetch(`${API_BASE}/analyze/${encodeURIComponent(filename)}`, { headers: authHeader() });
                 if (!analyzeResponse.ok) throw new Error(`Analyze failed: ${await analyzeResponse.text()}`);
                 const result = await analyzeResponse.json();
                 setPreviewResult(result);    // Images appear via displayedResult
@@ -518,7 +520,7 @@ const ImageSubmission = () => {
         if (!uploadedFilename) { setErrorMessage("No uploaded file available for CSV export."); return; }
         try {
             setErrorMessage("");
-            let csvUrl = `http://127.0.0.1:5000/download-single/${encodeURIComponent(uploadedFilename)}`;
+            let csvUrl = `${API_BASE}/download-single/${encodeURIComponent(uploadedFilename)}`;
             if (adjustedRatio !== null) {
                 csvUrl += `?fibrosis_ratio=${adjustedRatio}`;
             }
@@ -556,13 +558,13 @@ const ImageSubmission = () => {
         link.remove();
     };
 
-    // Only show extent after full analysis — preview images still appear immediately
+    // Only show extent after full analysis â€” preview images still appear immediately
     const fibrosisRatio = analysisResult?.fibrosis_ratio;
     // Simple statuses for the UI label
     const pipelineStatus = isAnalyzing
-        ? 'Running Diagnosis…'
+        ? 'Running Diagnosisâ€¦'
         : isUploading
-        ? `Uploading${uploadProgress > 0 && uploadProgress < 100 ? '… ' + uploadProgress + '%' : '…'}`
+        ? `Uploading${uploadProgress > 0 && uploadProgress < 100 ? 'â€¦ ' + uploadProgress + '%' : 'â€¦'}`
         : null;
 
     const renderRadarChart = (data) => {
@@ -684,21 +686,21 @@ const ImageSubmission = () => {
                         <div className="magnifier-sidebar">
                             <span className="mag-sidebar-label">Zoom</span>
                             <div className="mag-zoom-bar">
-                                <span className="mag-arrow-hint">▲</span>
+                                <span className="mag-arrow-hint">â–²</span>
                                 <div className="mag-zoom-track">
                                     <div className="mag-zoom-fill" style={{ height: `${zoomFraction * 100}%` }} />
                                 </div>
-                                <span className="mag-arrow-hint">▼</span>
+                                <span className="mag-arrow-hint">â–¼</span>
                             </div>
                         </div>
                     </div>
                     {/* Bottom bar: area adjustment */}
                     <div className="mag-bottom-bar">
-                        <span className="mag-arrow-hint">◀</span>
+                        <span className="mag-arrow-hint">â—€</span>
                         <div className="mag-adj-track">
                             <div className="mag-adj-center" />
                         </div>
-                        <span className="mag-arrow-hint">▶</span>
+                        <span className="mag-arrow-hint">â–¶</span>
                         <span className="mag-bottom-label">Area Adj.</span>
                     </div>
                 </div>
@@ -708,13 +710,13 @@ const ImageSubmission = () => {
 
     return (
         <div className="main-grid">
-            {/* Help button — fixed top-right */}
+            {/* Help button â€” fixed top-right */}
             <button className="help-btn" onClick={() => setShowHelp(true)} title="Help &amp; Keybindings">?</button>
 
-            {/* ── Left: images + extent description ── */}
+            {/* â”€â”€ Left: images + extent description â”€â”€ */}
             <div className="images-col">
                 <div className="comparison-grid">
-                    {/* Original — with tile overlay during analysis */}
+                    {/* Original â€” with tile overlay during analysis */}
                     <div
                         className={`img-panel drop-zone ${isDragging ? 'drag-over' : ''} ${magnifier && displayedResult?.original_image ? 'magnifier-active' : ''} ${isBusy ? 'busy' : ''}`}
                         onDragOver={handleDragOver}
@@ -730,7 +732,7 @@ const ImageSubmission = () => {
                         ) : image ? (
                             image.name.match(/\.(tif|tiff|svs)$/i) ? (
                                 <div className="placeholder-text" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', alignItems: 'center' }}>
-                                    <span style={{ fontSize: '1.5rem' }}>⌛</span>
+                                    <span style={{ fontSize: '1.5rem' }}>âŒ›</span>
                                     <span>{image.name}</span>
                                     <span style={{ fontSize: '0.75rem' }}>Generating preview...</span>
                                 </div>
@@ -746,7 +748,7 @@ const ImageSubmission = () => {
                         ) : (
                             <div className="placeholder-text">
                                 <div style={{ color: '#ffffff' }}>Click or Drop to Upload</div>
-                                <div style={{ fontSize: '0.7rem', marginTop: '0.4rem', color: '#ffffff' }}>SVS / TIF — any size &nbsp;·&nbsp; JPG / PNG / BMP — max 50 MB</div>
+                                <div style={{ fontSize: '0.7rem', marginTop: '0.4rem', color: '#ffffff' }}>SVS / TIF â€” any size &nbsp;Â·&nbsp; JPG / PNG / BMP â€” max 50 MB</div>
                             </div>
                         )}
 
@@ -757,13 +759,13 @@ const ImageSubmission = () => {
                         {/* Filename & change message at bottom of frame */}
                         {image && (
                             <div className="img-panel-footer">
-                                <span className="img-panel-filename">📄 {image.name}</span>
+                                <span className="img-panel-filename">ðŸ“„ {image.name}</span>
                                 {!isBusy && <span className="img-panel-change" onClick={handleClick}>Click or drop to change</span>}
-                                {isAnalyzing && <button className="cancel-diagnosis-btn" onClick={() => window.location.reload()}>✕ Cancel Diagnosis</button>}
+                                {isAnalyzing && <button className="cancel-diagnosis-btn" onClick={() => window.location.reload()}>âœ• Cancel Diagnosis</button>}
                             </div>
                         )}
 
-                        {/* Tile grid overlay — positioned over the actual image content only */}
+                        {/* Tile grid overlay â€” positioned over the actual image content only */}
                         {showTileOverlay && imgContentRect && (
                             <div className="tile-overlay" style={{
                                 left: imgContentRect.left,
@@ -821,7 +823,7 @@ const ImageSubmission = () => {
                         {magnifier && displayedMaskSrc && <div className="magnifier-dim" />}
                         {displayedMaskSrc && (
                             <button className="download-mask-btn" onClick={handleDownloadMask} title="Download fibrosis mask">
-                                ⬇ Save Mask
+                                â¬‡ Save Mask
                             </button>
                         )}
                     </div>
@@ -831,22 +833,22 @@ const ImageSubmission = () => {
                 <div className="extent-description">
                     {magnifier && displayedResult?.original_image ? (
                         <div className="binding-indicators">
-                            <p className="magnifier-area-msg">◀ ▶ magnifying glass threshold adjustments apply to the area under observation only</p>
+                            <p className="magnifier-area-msg">â—€ â–¶ magnifying glass threshold adjustments apply to the area under observation only</p>
                             <div className="binding-row">
                                 <div className="binding-group">
-                                    <span className="binding-key binding-key-yellow">▲</span>
+                                    <span className="binding-key binding-key-yellow">â–²</span>
                                     <span className="binding-label">Zoom In</span>
                                 </div>
                                 <div className="binding-group">
-                                    <span className="binding-key binding-key-yellow">▼</span>
+                                    <span className="binding-key binding-key-yellow">â–¼</span>
                                     <span className="binding-label">Zoom Out</span>
                                 </div>
                                 <div className="binding-group">
-                                    <span className="binding-key">◀</span>
-                                    <span className="binding-label">− Threshold</span>
+                                    <span className="binding-key">â—€</span>
+                                    <span className="binding-label">âˆ’ Threshold</span>
                                 </div>
                                 <div className="binding-group">
-                                    <span className="binding-key">▶</span>
+                                    <span className="binding-key">â–¶</span>
                                     <span className="binding-label">+ Threshold</span>
                                 </div>
                                 <div className="binding-group">
@@ -881,7 +883,7 @@ const ImageSubmission = () => {
                 {errorMessage && <p className="error-text">{errorMessage}</p>}
             </div>
 
-            {/* ── Right: diagnosis report ── */}
+            {/* â”€â”€ Right: diagnosis report â”€â”€ */}
             <aside className="report-col">
                 <div className="report-header">
                     <h2 className="report-title">DIAGNOSIS REPORT</h2>
@@ -890,11 +892,11 @@ const ImageSubmission = () => {
                         onClick={handleDownloadCsv}
                         disabled={!uploadedFilename || isUploading || isAnalyzing}
                     >
-                        ⬇ Download CSV
+                        â¬‡ Download CSV
                     </button>
                 </div>
 
-                {/* Patch progress card — only visible during SVS/TIF analysis */}
+                {/* Patch progress card â€” only visible during SVS/TIF analysis */}
                 {patchProgress && isAnalyzing && (
                     <div className="report-card" style={{ borderColor: '#4ecdc4' }}>
                         <p className="report-label" style={{ color: '#4ecdc4', fontWeight: 600 }}>Patch Analysis in Progress</p>
@@ -909,7 +911,7 @@ const ImageSubmission = () => {
                             <span>{patchProgress.tissue_patches} tissue patches found</span>
                         </div>
                         <p style={{ fontSize: '0.72rem', color: '#fff', marginTop: '0.3rem' }}>
-                            Processing 256×256 patches, skipping blank areas…
+                            Processing 256Ã—256 patches, skipping blank areasâ€¦
                         </p>
                     </div>
                 )}
@@ -925,13 +927,13 @@ const ImageSubmission = () => {
                     <p className="report-value">
                         {fibrosisRatio !== undefined ? `${Number(fibrosisRatio).toFixed(2)}%` : '--'}
                         {adjustedRatio !== null && (
-                            <span className="adjusted-ratio"> → {Number(adjustedRatio).toFixed(2)}%</span>
+                            <span className="adjusted-ratio"> â†’ {Number(adjustedRatio).toFixed(2)}%</span>
                         )}
                     </p>
                     {hasLocalEdits && (
                         <div className="local-edits-badge">
-                            <span>■ Area adjustments applied</span>
-                            <button className="undo-area-btn" onClick={handleUndoArea} title="Undo last area modification (Ctrl+Z)">↩ Undo Step</button>
+                            <span>â–  Area adjustments applied</span>
+                            <button className="undo-area-btn" onClick={handleUndoArea} title="Undo last area modification (Ctrl+Z)">â†© Undo Step</button>
                         </div>
                     )}
                     {autoThreshold !== null && (
@@ -939,7 +941,7 @@ const ImageSubmission = () => {
                             <label className="threshold-label">
                                 Baseline Threshold
                                 <span className="threshold-value">{Number(userThreshold).toFixed(3)}</span>
-                                {isRethresholding && <span className="threshold-loading">⟳</span>}
+                                {isRethresholding && <span className="threshold-loading">âŸ³</span>}
                             </label>
                             <input
                                 type="range"
@@ -969,7 +971,7 @@ const ImageSubmission = () => {
                                         setAdjustedMask(null);
                                         setHasLocalEdits(false);
                                         setDeltaMap(null);
-                                        fetch(`http://127.0.0.1:5000/rethreshold/${encodeURIComponent(uploadedFilename)}?threshold=${autoThreshold}`, { headers: authHeader() })
+                                        fetch(`${API_BASE}/rethreshold/${encodeURIComponent(uploadedFilename)}?threshold=${autoThreshold}`, { headers: authHeader() })
                                             .catch(() => {});
                                     };
                                     if (hasLocalEdits) {
@@ -983,7 +985,7 @@ const ImageSubmission = () => {
                     )}
                 </div>
 
-                {/* FCM Membership Radar Chart — 4 categories + spectrum note */}
+                {/* FCM Membership Radar Chart â€” 4 categories + spectrum note */}
                 {analysisResult && (analysisResult.None !== undefined) && (
                     <div className="report-card" style={{ border: '1px solid #4ecdc4' }}>
                         <p className="report-label">FCM Cluster Membership</p>
@@ -1031,7 +1033,7 @@ const ImageSubmission = () => {
             {showHelp && (
                 <div className="confirm-overlay" onClick={() => setShowHelp(false)}>
                     <div className="help-modal" onClick={(e) => e.stopPropagation()}>
-                        <button className="help-close" onClick={() => setShowHelp(false)}>✕</button>
+                        <button className="help-close" onClick={() => setShowHelp(false)}>âœ•</button>
                         <h2 className="help-title">How to Use AI-Fibrosis</h2>
 
                         <div className="help-section">
@@ -1048,8 +1050,8 @@ const ImageSubmission = () => {
                             <h3>Magnifying Glass & Fine Adjustments</h3>
                             <p>Hover over the original image to activate the magnifying glass. Use arrow keys to zoom and adjust the threshold for just the area under observation:</p>
                             <ul className="help-bindings">
-                                <li><kbd>▲</kbd> <kbd>▼</kbd> Zoom in / out</li>
-                                <li><kbd>◀</kbd> <kbd>▶</kbd> Decrease / increase area threshold</li>
+                                <li><kbd>â–²</kbd> <kbd>â–¼</kbd> Zoom in / out</li>
+                                <li><kbd>â—€</kbd> <kbd>â–¶</kbd> Decrease / increase area threshold</li>
                                 <li><kbd>Ctrl+R</kbd> Reset observed area to original threshold</li>
                                 <li><kbd>Ctrl+Z</kbd> Undo all increments made to the last modified area</li>
                                 <li><kbd>Esc</kbd> Close overlays</li>
