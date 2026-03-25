@@ -23,7 +23,7 @@ function App() {
       {/* ── Top bar ── */}
       <header className="top-bar">
         <div className="top-bar-left">
-          <span className="brand-icon">🔬</span>
+          <svg className="brand-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="8" r="5"/><path d="M7 13 4.5 21h15L17 13"/><line x1="12" y1="3" x2="12" y2="0.5"/></svg>
           <span className="brand-name">fibrosisai</span>
         </div>
         <span className="top-bar-subtitle">
@@ -33,7 +33,7 @@ function App() {
           VGG16 FEATURE EXTRACTION → FUZZY C-MEANS CLUSTERING
         </span>
         <div className="user-badge">
-          <span>👤 {user}</span>
+          <span><svg className="user-icon-svg" viewBox="0 0 20 20" fill="currentColor"><path d="M10 10a4 4 0 100-8 4 4 0 000 8zm-7 8a7 7 0 0114 0H3z"/></svg> {user}</span>
           <button className="logout-btn" onClick={handleLogout}>Sign Out</button>
         </div>
       </header>

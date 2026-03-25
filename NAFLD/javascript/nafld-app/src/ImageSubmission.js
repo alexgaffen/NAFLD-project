@@ -732,7 +732,7 @@ const ImageSubmission = () => {
                         ) : image ? (
                             image.name.match(/\.(tif|tiff|svs)$/i) ? (
                                 <div className="placeholder-text" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', alignItems: 'center' }}>
-                                    <span style={{ fontSize: '1.5rem' }}>⌛</span>
+                                    <span className="loading-hourglass" />
                                     <span>{image.name}</span>
                                     <span style={{ fontSize: '0.75rem' }}>Generating preview...</span>
                                 </div>
@@ -759,9 +759,9 @@ const ImageSubmission = () => {
                         {/* Filename & change message at bottom of frame */}
                         {image && (
                             <div className="img-panel-footer">
-                                <span className="img-panel-filename">📄 {image.name}</span>
+                                <span className="img-panel-filename">{image.name}</span>
                                 {!isBusy && <span className="img-panel-change" onClick={handleClick}>Click or drop to change</span>}
-                                {isAnalyzing && <button className="cancel-diagnosis-btn" onClick={() => window.location.reload()}>✕ Cancel Diagnosis</button>}
+                                {isAnalyzing && <button className="cancel-diagnosis-btn" onClick={() => window.location.reload()}>× Cancel Diagnosis</button>}
                             </div>
                         )}
 
@@ -823,7 +823,7 @@ const ImageSubmission = () => {
                         {magnifier && displayedMaskSrc && <div className="magnifier-dim" />}
                         {displayedMaskSrc && (
                             <button className="download-mask-btn" onClick={handleDownloadMask} title="Download fibrosis mask">
-                                ⬇ Save Mask
+                                ↓ Save Mask
                             </button>
                         )}
                     </div>
@@ -892,7 +892,7 @@ const ImageSubmission = () => {
                         onClick={handleDownloadCsv}
                         disabled={!uploadedFilename || isUploading || isAnalyzing}
                     >
-                        ⬇ Download CSV
+                        ↓ Download CSV
                     </button>
                 </div>
 
@@ -1033,7 +1033,7 @@ const ImageSubmission = () => {
             {showHelp && (
                 <div className="confirm-overlay" onClick={() => setShowHelp(false)}>
                     <div className="help-modal" onClick={(e) => e.stopPropagation()}>
-                        <button className="help-close" onClick={() => setShowHelp(false)}>✕</button>
+                        <button className="help-close" onClick={() => setShowHelp(false)}>&times;</button>
                         <h2 className="help-title">How to Use fibrosisai</h2>
 
                         <div className="help-section">
