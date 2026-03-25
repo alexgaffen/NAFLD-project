@@ -12,7 +12,7 @@ import zipfile
 import io
 import csv
 from werkzeug.utils import secure_filename
-from nafld import analyze_single_file, preview_single_file, analyze_single_file_patched, rethreshold, rethreshold_area, reset_area, undo_area, get_delta_map, pil_to_b64
+from nafld import analyze_single_file, preview_single_file, analyze_single_file_patched, rethreshold, rethreshold_area, reset_area, undo_area, get_delta_map, pil_to_b64, classify_from_mask
 
 # sys.path.append("C:\\Projects\\Machine Learning\\NAFLD\\NAFLD-project\\NAFLD\\src\\py-src\\nafld.py")
 from nafld import process_all_images
@@ -254,6 +254,16 @@ def undo_area_file(filename):
         'delta_map': f"data:image/png;base64,{delta_map_b64}" if delta_map_b64 else None,
         'has_local_edits': has_edits,
     }), 200
+
+
+@app.route("/classify-mask/<filename>", methods=['GET'])
+@login_required
+def classify_mask_file(filename):
+    """Run VGG16 + FCM classification on the current refined B&W mask."""
+    result = classify_from_mask(filename)
+    if result is None:
+        return jsonify({'error': 'No cached analysis data. Analyze the image first.'}), 404
+    return jsonify(result), 200
 
 
 @app.route("/download-single/<filename>", methods=['GET'])

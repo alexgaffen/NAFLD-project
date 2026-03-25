@@ -58,6 +58,10 @@ const ImageSubmission = () => {
     const [deltaMap, setDeltaMap] = useState(null); // base64 PNG of modified areas
     const [showHelp, setShowHelp] = useState(false);
 
+    // Classification from refined mask (separate from initial analysis)
+    const [classificationResult, setClassificationResult] = useState(null);
+    const [isClassifying, setIsClassifying] = useState(false);
+
     const displayedResult = analysisResult || previewResult;
 
     // Compute where the object-fit:contain image actually renders inside the panel
@@ -291,6 +295,31 @@ const ImageSubmission = () => {
         }
     }, [uploadedFilename]);
 
+    // Classify from refined mask
+    const handleClassifyMask = useCallback(async () => {
+        if (!uploadedFilename) return;
+        setIsClassifying(true);
+        setClassificationResult(null);
+        try {
+            const res = await fetch(
+                `${API_BASE}/classify-mask/${encodeURIComponent(uploadedFilename)}`,
+                { headers: authHeader() }
+            ).then(handleAuthError);
+            if (res.ok) {
+                const data = await res.json();
+                setClassificationResult(data);
+            } else {
+                const err = await res.json().catch(() => ({}));
+                setErrorMessage(err.error || 'Classification failed.');
+            }
+        } catch (e) {
+            console.error('Classify mask error:', e);
+            setErrorMessage('Unable to reach classification endpoint.');
+        } finally {
+            setIsClassifying(false);
+        }
+    }, [uploadedFilename]);
+
     // Key handler: Ctrl+Z = undo (anytime), Ctrl+R = reset area (magnifier active),
     // arrows = zoom & area delta (magnifier active), Escape = close overlays
     useEffect(() => {
@@ -405,6 +434,7 @@ const ImageSubmission = () => {
         setErrorMessage("");
         setPreviewResult(null);
         setAnalysisResult(null);
+        setClassificationResult(null);
         setUploadedFilename("");
         setUploadProgress(0);
         setTileGrid(null);
@@ -986,14 +1016,45 @@ const ImageSubmission = () => {
                 </div>
 
                 {/* FCM Membership Radar Chart — 4 categories + spectrum note */}
-                {analysisResult && (analysisResult.None !== undefined) && (
+                {analysisResult && !isAnalyzing && (
                     <div className="report-card" style={{ border: '1px solid #4ecdc4' }}>
-                        <p className="report-label">FCM Cluster Membership</p>
-                        {renderRadarChart(analysisResult)}
-                        <p style={{ fontSize: '0.78rem', color: '#fff', lineHeight: 1.5, marginTop: '0.25rem', borderTop: '1px solid #253545', paddingTop: '0.4rem' }}>
-                            <strong style={{ color: '#f7b731' }}>Gradual Spectrum:</strong>{' '}
-                            Fibrosis categories overlap continuously. FCM assigns probabilistic membership across 4 clusters rather than a hard category.
-                        </p>
+                        <p className="report-label">Disease Classification</p>
+
+                        {!classificationResult && !isClassifying && (
+                            <div className="classify-prompt">
+                                <p className="classify-hint">
+                                    Fine-tune the fibrosis mask using the baseline threshold slider and magnifying glass area adjustments. Once the mask accurately represents the fibrosis, click below to classify.
+                                </p>
+                                <button className="classify-btn" onClick={handleClassifyMask}>
+                                    Diagnose
+                                </button>
+                            </div>
+                        )}
+
+                        {isClassifying && (
+                            <div className="classify-loading">
+                                <span className="classify-spinner" />
+                                <span>Classifying refined mask...</span>
+                            </div>
+                        )}
+
+                        {classificationResult && classificationResult.status === 'success' && (
+                            <>
+                                {renderRadarChart(classificationResult)}
+                                {classificationResult.top_n_used && (
+                                    <p style={{ fontSize: '0.72rem', color: '#8a9bae', marginTop: '0.25rem' }}>
+                                        Based on the top {classificationResult.top_n_used} most severe tiles out of {classificationResult.patch_count} classified
+                                    </p>
+                                )}
+                                <p style={{ fontSize: '0.78rem', color: '#fff', lineHeight: 1.5, marginTop: '0.25rem', borderTop: '1px solid #253545', paddingTop: '0.4rem' }}>
+                                    <strong style={{ color: '#f7b731' }}>Gradual Spectrum:</strong>{' '}
+                                    Fibrosis categories overlap continuously. FCM assigns probabilistic membership across 4 clusters rather than a hard category.
+                                </p>
+                                <button className="reclassify-btn" onClick={handleClassifyMask}>
+                                    Re-diagnose
+                                </button>
+                            </>
+                        )}
                     </div>
                 )}
 

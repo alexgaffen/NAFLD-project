@@ -999,6 +999,72 @@ html, body, #root {
   border-top: 1px solid #253545;
 }
 
+/* ── Classify / Diagnose button ── */
+.classify-prompt {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.5rem 0;
+}
+.classify-hint {
+  font-size: 0.75rem;
+  color: #8a9bae;
+  line-height: 1.5;
+  text-align: center;
+}
+.classify-btn {
+  width: 100%;
+  padding: 0.65rem 1rem;
+  border: none;
+  border-radius: 0.5rem;
+  background: linear-gradient(135deg, #4ecdc4 0%, #3ab8b0 100%);
+  color: #0a0f16;
+  font-size: 0.92rem;
+  font-weight: 700;
+  cursor: pointer;
+  letter-spacing: 0.5px;
+  transition: box-shadow 0.3s, transform 0.2s;
+}
+.classify-btn:hover {
+  box-shadow: 0 4px 20px rgba(78, 205, 196, 0.35);
+  transform: translateY(-1px);
+}
+.classify-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.8rem 0;
+  font-size: 0.8rem;
+  color: #8a9bae;
+}
+.classify-spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(78, 205, 196, 0.2);
+  border-top-color: #4ecdc4;
+  border-radius: 50%;
+  animation: loadingSpin 0.8s linear infinite;
+}
+.reclassify-btn {
+  width: 100%;
+  margin-top: 0.5rem;
+  padding: 0.45rem 0.8rem;
+  border: 1px solid #3a4f63;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: #8a9bae;
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+}
+.reclassify-btn:hover {
+  color: #4ecdc4;
+  border-color: #4ecdc4;
+}
+
 /* ── Login screen ── */
 .login-backdrop {
   position: fixed;

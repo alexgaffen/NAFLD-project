@@ -449,6 +449,119 @@ def get_delta_map(cache_key):
     return base64.b64encode(buf.getvalue()).decode('utf-8')
 
 
+def classify_from_mask(cache_key, patch_size=256, top_n=5):
+    """
+    Run VGG16 + PCA + FCM classification on the current refined B&W mask.
+
+    For large (patchable) images the mask is tiled into patch_size squares
+    and each tissue tile is classified independently.  The final score is
+    the average of the *top_n* worst (most-fibrotic) tiles — i.e. the tiles
+    whose membership leans most toward higher-stage disease.
+
+    For small images the whole mask is classified in a single pass.
+
+    Returns a dict with cluster_label, membership_scores, patch_count, etc.
+    or None when no cached data is available.
+    """
+    entry = _deconv_cache.get(cache_key)
+    if entry is None:
+        return None
+
+    # Rebuild the current mask from cache (honours all threshold edits)
+    mask_pil, _, _, _ = _recompute_mask(entry)
+    mask_np = np.array(mask_pil)
+    h, w = mask_np.shape[:2]
+
+    # Determine if we should tile (same heuristic as patched analysis)
+    is_large = max(h, w) > 2048
+
+    if not is_large:
+        # ── Single-image classification: feed the B&W mask to VGG16 ──
+        features = extract_features(mask_pil)
+        reduc_features = pca_model.transform([features])
+        u, _, _, _, _, _ = cmeans_predict(reduc_features.T, centroids, m=best_m, error=0.1, maxiter=100)
+        if cluster_map is not None:
+            n_groups = max(cluster_map.values()) + 1
+            u_merged = np.zeros((n_groups, u.shape[1]))
+            for src, dst in cluster_map.items():
+                u_merged[dst] += u[src]
+            u = u_merged
+        label_idx = int(np.argmax(u, axis=0))
+        label_text = cluster_lookup_table.get(label_idx, f"Unknown Cluster {label_idx}")
+        scores = {membership_column_names[i]: float(u[i][0]) for i in range(4)}
+        return {
+            "status": "success",
+            "cluster_label": label_text,
+            "membership_scores": scores,
+            "patch_count": 1,
+            **scores,
+        }
+
+    # ── Patch-based classification for large images ──
+    rows_range = list(range(0, h, patch_size))
+    cols_range = list(range(0, w, patch_size))
+    patch_memberships = []
+
+    for py in rows_range:
+        for px in cols_range:
+            tile = mask_np[py:py + patch_size, px:px + patch_size]
+            th, tw = tile.shape[:2]
+            if th < 32 or tw < 32:
+                continue
+
+            # Skip tiles that are entirely black (no fibrosis)
+            gray = np.mean(tile.astype(np.float32), axis=2) if tile.ndim == 3 else tile.astype(np.float32)
+            if np.sum(gray > 128) / gray.size < 0.01:
+                continue
+
+            tile_pil = Image.fromarray(tile)
+            try:
+                features = extract_features(tile_pil)
+                reduc_features = pca_model.transform([features])
+                u, _, _, _, _, _ = cmeans_predict(reduc_features.T, centroids, m=best_m, error=0.1, maxiter=100)
+                if cluster_map is not None:
+                    n_groups = max(cluster_map.values()) + 1
+                    u_merged = np.zeros((n_groups, u.shape[1]))
+                    for src, dst in cluster_map.items():
+                        u_merged[dst] += u[src]
+                    u = u_merged
+                patch_memberships.append([float(u[i][0]) for i in range(4)])
+            except Exception as e:
+                print(f"[classify_from_mask] Patch ({py},{px}) failed: {e}")
+            finally:
+                del tile_pil
+
+            if len(patch_memberships) % 10 == 0:
+                gc.collect()
+
+    if not patch_memberships:
+        return {"status": "error", "message": "No classifiable tiles found in mask"}
+
+    # Rank tiles by severity: higher-stage membership (Bridging + Cirrosis)
+    # indices: 1=Bridging, 2=Cirrosis
+    severity = [m[1] + m[2] for m in patch_memberships]
+    ranked_indices = sorted(range(len(severity)), key=lambda i: severity[i], reverse=True)
+    top_indices = ranked_indices[:min(top_n, len(ranked_indices))]
+    top_memberships = [patch_memberships[i] for i in top_indices]
+    avg_memberships = np.mean(top_memberships, axis=0)
+
+    label_idx = int(np.argmax(avg_memberships))
+    label_text = cluster_lookup_table.get(label_idx, f"Unknown Cluster {label_idx}")
+    scores = {membership_column_names[i]: float(avg_memberships[i]) for i in range(4)}
+
+    print(f"[classify_from_mask] {len(patch_memberships)} tiles classified, "
+          f"top-{min(top_n, len(patch_memberships))} worst averaged → {label_text}")
+
+    return {
+        "status": "success",
+        "cluster_label": label_text,
+        "membership_scores": scores,
+        "patch_count": len(patch_memberships),
+        "top_n_used": min(top_n, len(patch_memberships)),
+        **scores,
+    }
+
+
 def predict_cluster_pil(pil_image, already_filtered=False, original_pil=None):
     """
     Classify an image using VGG16 + PCA + Fuzzy C-Means.
