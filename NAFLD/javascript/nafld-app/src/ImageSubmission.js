@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+﻿import { useState, useRef, useCallback, useEffect } from "react";
 
 const API_BASE = process.env.REACT_APP_API_URL || "http://127.0.0.1:5000";
 
@@ -813,7 +813,7 @@ const ImageSubmission = () => {
                         onMouseMove={displayedMaskSrc ? handlePanelMouseMove : undefined}
                         onMouseLeave={displayedMaskSrc ? handlePanelMouseLeave : undefined}
                     >
-                        <span className="img-label accent">AI Fibrosis Mask</span>
+                        <span className="img-label accent">fibrosisai Mask</span>
                         {displayedMaskSrc ? (
                             <img ref={filteredImgRef} alt="Fibrosis mask" src={displayedMaskSrc} className="preview-image" draggable="false" onDragStart={(e) => e.preventDefault()} />
                         ) : (
@@ -1034,7 +1034,7 @@ const ImageSubmission = () => {
                 <div className="confirm-overlay" onClick={() => setShowHelp(false)}>
                     <div className="help-modal" onClick={(e) => e.stopPropagation()}>
                         <button className="help-close" onClick={() => setShowHelp(false)}>✕</button>
-                        <h2 className="help-title">How to Use AI-Fibrosis</h2>
+                        <h2 className="help-title">How to Use fibrosisai</h2>
 
                         <div className="help-section">
                             <h3>Analysis</h3>

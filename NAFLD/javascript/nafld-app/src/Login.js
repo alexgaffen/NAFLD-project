@@ -45,7 +45,7 @@ const Login = ({ onLogin }) => {
         <div className="login-backdrop">
             <form className="login-card" onSubmit={handleSubmit}>
                 <div className="login-icon">🔬</div>
-                <h1 className="login-title">AIFIBROSIS</h1>
+                <h1 className="login-title">fibrosisai</h1>
                 <p className="login-subtitle">Sign in to continue</p>
 
                 <label className="login-label">

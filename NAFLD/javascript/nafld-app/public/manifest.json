@@ -1,6 +1,6 @@
 {
-  "short_name": "FibroAi",
-  "name": "FibroAi - AI Fibrosis Analysis",
+  "short_name": "fibrosisai",
+  "name": "fibrosisai",
   "icons": [
     {
       "src": "faviconliver.png",

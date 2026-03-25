@@ -24,7 +24,7 @@ function App() {
       <header className="top-bar">
         <div className="top-bar-left">
           <span className="brand-icon">🔬</span>
-          <span className="brand-name">AIFIBROSIS</span>
+          <span className="brand-name">fibrosisai</span>
         </div>
         <span className="top-bar-subtitle">
           AI-BASED UNSUPERVISED CLASSIFICATION AND QUANTIFICATION OF MOUSE LIVER FIBROSIS IN MASH
