@@ -1184,27 +1184,33 @@ html, body, #root {
   background: radial-gradient(circle, rgba(78, 205, 196, 0.08) 0%, transparent 70%);
   pointer-events: none;
 }
+.login-header-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin-bottom: 0.1rem;
+}
 .login-icon {
-  width: 80px;
-  height: 80px;
-  margin-bottom: 0.2rem;
+  width: 52px;
+  height: 52px;
+  flex-shrink: 0;
   animation: loginIconPulse 3s ease-in-out infinite;
 }
 .liver-svg {
   width: 100%;
   height: 100%;
-  filter: drop-shadow(0 0 12px rgba(78, 205, 196, 0.3));
+  filter: drop-shadow(0 0 10px rgba(78, 205, 196, 0.25)) drop-shadow(0 0 20px rgba(232, 115, 90, 0.15));
 }
 @keyframes loginIconPulse {
   0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.08); }
+  50% { transform: scale(1.06); }
 }
 .login-title {
-  font-size: 1.3rem;
+  font-size: 1.2rem;
   font-weight: 700;
   color: #fff;
   margin: 0;
-  letter-spacing: 0.5px;
+  letter-spacing: -0.2px;
 }
 .login-subtitle {
   font-size: 0.75rem;
