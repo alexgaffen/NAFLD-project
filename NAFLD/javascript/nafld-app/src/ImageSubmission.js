@@ -397,7 +397,7 @@ const ImageSubmission = () => {
                     classifyGridInfo.current = {
                         rows: result.grid_rows, cols: result.grid_cols,
                         imgH: result.img_h, imgW: result.img_w,
-                        patchSize: result.patch_size || 256,
+                        patchSize: result.patch_size || 128,
                     };
                 }
                 setMaskChangedSinceClassify(false);
