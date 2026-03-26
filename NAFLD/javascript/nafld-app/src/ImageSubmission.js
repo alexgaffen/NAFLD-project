@@ -349,56 +349,72 @@ const ImageSubmission = () => {
         setWorstPatchCoords(null);
         setShowWorstPatches(false);
         classifyGridInfo.current = null;
-        try {
-            const result = await new Promise((resolve, reject) => {
-                const evtSource = new EventSource(
-                    `${API_BASE}/classify-mask/${encodeURIComponent(uploadedFilename)}?token=${encodeURIComponent(sessionStorage.getItem('access_token') || '')}`
-                );
-                evtSource.onmessage = (event) => {
-                    try {
-                        const msg = JSON.parse(event.data);
-                        if (msg.type === 'progress') {
-                            setClassifyProgress({ current: msg.current, total: msg.total, tissue_patches: msg.tissue_patches });
-                            if (msg.grid_rows !== undefined) {
-                                setClassifyTileGrid(prev => {
-                                    const r = msg.grid_rows, c = msg.grid_cols;
-                                    const tiles = prev && prev.tiles.length === r * c ? [...prev.tiles] : new Array(r * c).fill(0);
-                                    tiles[msg.tile_row * c + msg.tile_col] = msg.is_tissue ? 2 : 1;
-                                    return { rows: r, cols: c, tiles };
-                                });
-                            }
-                        } else if (msg.type === 'result') {
-                            evtSource.close();
-                            resolve(msg.data);
-                        }
-                    } catch (e) {
-                        evtSource.close();
-                        reject(e);
-                    }
-                };
-                evtSource.onerror = () => {
-                    evtSource.close();
-                    reject(new Error('Classification stream connection lost'));
-                };
-            });
-            setClassificationResult(result);
-            if (result.worst_patches) {
-                setWorstPatchCoords(result.worst_patches);
-                classifyGridInfo.current = {
-                    rows: result.grid_rows, cols: result.grid_cols,
-                    imgH: result.img_h, imgW: result.img_w,
-                    patchSize: result.patch_size || 256,
-                };
+
+        const maxRetries = 3;
+        let lastError = null;
+
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            if (attempt > 0) {
+                await new Promise(r => setTimeout(r, 1000));
+                setClassifyTileGrid(null);
+                setClassifyProgress(null);
             }
-            setMaskChangedSinceClassify(false);
-        } catch (e) {
-            console.error('Classify mask error:', e);
-            setErrorMessage('Classification failed or connection lost.');
-        } finally {
-            setIsClassifying(false);
-            setClassifyTileGrid(null);
-            setClassifyProgress(null);
+            try {
+                const result = await new Promise((resolve, reject) => {
+                    let settled = false;
+                    const evtSource = new EventSource(
+                        `${API_BASE}/classify-mask/${encodeURIComponent(uploadedFilename)}?token=${encodeURIComponent(sessionStorage.getItem('access_token') || '')}`
+                    );
+                    evtSource.onmessage = (event) => {
+                        try {
+                            const msg = JSON.parse(event.data);
+                            if (msg.type === 'progress') {
+                                setClassifyProgress({ current: msg.current, total: msg.total, tissue_patches: msg.tissue_patches });
+                                if (msg.grid_rows !== undefined) {
+                                    setClassifyTileGrid(prev => {
+                                        const r = msg.grid_rows, c = msg.grid_cols;
+                                        const tiles = prev && prev.tiles.length === r * c ? [...prev.tiles] : new Array(r * c).fill(0);
+                                        tiles[msg.tile_row * c + msg.tile_col] = msg.is_tissue ? 2 : 1;
+                                        return { rows: r, cols: c, tiles };
+                                    });
+                                }
+                            } else if (msg.type === 'result') {
+                                settled = true;
+                                evtSource.close();
+                                resolve(msg.data);
+                            }
+                        } catch (e) {
+                            if (!settled) { settled = true; evtSource.close(); reject(e); }
+                        }
+                    };
+                    evtSource.onerror = () => {
+                        if (!settled) { settled = true; evtSource.close(); reject(new Error('Connection lost')); }
+                    };
+                });
+                setClassificationResult(result);
+                if (result && result.worst_patches) {
+                    setWorstPatchCoords(result.worst_patches);
+                    classifyGridInfo.current = {
+                        rows: result.grid_rows, cols: result.grid_cols,
+                        imgH: result.img_h, imgW: result.img_w,
+                        patchSize: result.patch_size || 256,
+                    };
+                }
+                setMaskChangedSinceClassify(false);
+                lastError = null;
+                break;
+            } catch (e) {
+                lastError = e;
+                console.warn(`Classify attempt ${attempt + 1}/${maxRetries} failed:`, e.message);
+            }
         }
+        if (lastError) {
+            console.error('Classify mask error after retries:', lastError);
+            setErrorMessage('Classification failed or connection lost.');
+        }
+        setIsClassifying(false);
+        setClassifyTileGrid(null);
+        setClassifyProgress(null);
     }, [uploadedFilename]);
 
     // Key handler: Ctrl+Z = undo (anytime), Ctrl+R = reset area (magnifier active),
@@ -1290,8 +1306,14 @@ const ImageSubmission = () => {
                         </div>
 
                         <div className="help-section">
+                            <h3>Diagnose</h3>
+                            <p>Once the fibrosis mask is refined to your satisfaction, click <strong>Diagnose</strong> to run the classification pipeline (VGG16 + Fuzzy C-Means) on the refined mask. For large images, each tile is classified individually and results are averaged from the most severe patches.</p>
+                            <p>After diagnosis, a radar chart shows probabilistic membership across four fibrosis stages. Use <strong>Re-diagnose</strong> after making further threshold adjustments. <strong>Analyze Patch Results</strong> highlights the five most severe tiles on the mask image with red outlines.</p>
+                        </div>
+
+                        <div className="help-section">
                             <h3>Exports</h3>
-                            <p><strong>Download CSV</strong> exports the diagnosis result. <strong>Save Mask</strong> downloads the current fibrosis mask image (including any threshold adjustments).</p>
+                            <p><strong>Download CSV</strong> exports the diagnosis result (including classification scores when available). <strong>Save Mask</strong> downloads the current fibrosis mask image (including any threshold adjustments).</p>
                         </div>
 
                         <div className="help-esc">Press Esc to close</div>

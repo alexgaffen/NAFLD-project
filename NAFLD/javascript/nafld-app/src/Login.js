@@ -5,8 +5,9 @@ const API_BASE = process.env.REACT_APP_API_URL || "http://127.0.0.1:5000";
 const FEATURES = [
     { title: "Colour Deconvolution", desc: "Isolates collagen fibers from PSR-stained tissue via optical density separation" },
     { title: "Adaptive Thresholding", desc: "Automatically determines the optimal binary threshold to quantify fibrosis extent" },
+    { title: "Interactive Refinement", desc: "Fine-tune the fibrosis mask with a magnifying glass, per-area threshold adjustments, and live mini-map" },
     { title: "VGG16 Deep Features", desc: "Extracts high-level architectural patterns from tissue patches using a pretrained CNN" },
-    { title: "Fuzzy C-Means Staging", desc: "Classifies fibrosis into probabilistic stages \u2014 no hard boundaries, just a continuous spectrum" },
+    { title: "Fuzzy C-Means Staging", desc: "Classifies the refined mask into probabilistic stages with worst-patch analysis" },
 ];
 
 const Login = ({ onLogin }) => {
@@ -102,6 +103,8 @@ const Login = ({ onLogin }) => {
                             <span>PSR Staining</span>
                             <span className="login-pipe-arrow">&rarr;</span>
                             <span>Deconvolution</span>
+                            <span className="login-pipe-arrow">&rarr;</span>
+                            <span>Refinement</span>
                             <span className="login-pipe-arrow">&rarr;</span>
                             <span>VGG16</span>
                             <span className="login-pipe-arrow">&rarr;</span>
