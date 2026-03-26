@@ -60,7 +60,7 @@ function App() {
           <span className="brand-name">fibrosisai</span>
         </div>
         <span className="top-bar-subtitle">
-          AI-BASED UNSUPERVISED CLASSIFICATION AND QUANTIFICATION OF MOUSE LIVER FIBROSIS IN MASH
+          AI-BASED UNSUPERVISED CLASSIFICATION AND QUANTIFICATION OF LIVER FIBROSIS
         </span>
         <span className="top-bar-pipeline">
           VGG16 FEATURE EXTRACTION → FCM CLUSTERING

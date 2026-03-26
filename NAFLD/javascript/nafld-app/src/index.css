@@ -22,7 +22,7 @@ html, body, #root {
   display: flex;
   align-items: center;
   gap: 1rem;
-  padding: 0.5rem 1.25rem;
+  padding: 0.5rem 3.25rem 0.5rem 1.25rem;
   background: #16202b;
   border-bottom: 3px solid rgba(255,255,255,0.85);
   flex-shrink: 0;
@@ -898,28 +898,28 @@ html, body, #root {
 /* ── Help Button ── */
 .help-btn {
   position: fixed;
-  top: 0.45rem;
-  right: 0.75rem;
+  top: 0.5rem;
+  right: 0.65rem;
   z-index: 100;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
-  border: 1.5px solid rgba(78, 205, 196, 0.4);
-  background: rgba(78, 205, 196, 0.08);
-  color: #4ecdc4;
-  font-size: 0.85rem;
+  border: 2px solid #4ecdc4;
+  background: #4ecdc4;
+  color: #0f1923;
+  font-size: 0.9rem;
   font-weight: 800;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.2s, transform 0.15s, color 0.2s, border-color 0.2s;
+  transition: background 0.2s, transform 0.15s;
+  box-shadow: 0 2px 8px rgba(78, 205, 196, 0.3);
 }
 .help-btn:hover {
-  background: #4ecdc4;
-  color: #0f1923;
-  border-color: #4ecdc4;
-  transform: scale(1.08);
+  background: #3dbdb5;
+  border-color: #3dbdb5;
+  transform: scale(1.1);
 }
 
 /* ── Help Overlay ── */
@@ -1506,10 +1506,8 @@ html, body, #root {
   align-items: center;
   gap: 0.55rem;
   margin-left: auto;
-  background: rgba(78, 205, 196, 0.08);
-  border: 1px solid rgba(78, 205, 196, 0.25);
-  border-radius: 2rem;
-  padding: 0.3rem 0.7rem 0.3rem 0.55rem;
+  border-left: 1px solid #3a4f63;
+  padding-left: 1rem;
 }
 .user-badge-name {
   font-size: 0.78rem;
