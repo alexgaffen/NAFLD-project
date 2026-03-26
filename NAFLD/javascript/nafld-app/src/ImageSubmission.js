@@ -397,7 +397,7 @@ const ImageSubmission = () => {
                     classifyGridInfo.current = {
                         rows: result.grid_rows, cols: result.grid_cols,
                         imgH: result.img_h, imgW: result.img_w,
-                        patchSize: result.patch_size || 128,
+                        patchSize: result.patch_size || 256,
                     };
                 }
                 setMaskChangedSinceClassify(false);
@@ -706,7 +706,7 @@ const ImageSubmission = () => {
 
     const renderRadarChart = (data) => {
         if (!data) return null;
-        const cx = 150, cy = 150, R = 80;
+        const cx = 170, cy = 150, R = 80;
         const N = 4;
         const cats = [
             { key: 'None',            label: 'None',            sub: 'F0' },
@@ -737,7 +737,7 @@ const ImageSubmission = () => {
             return webPts;
         });
         return (
-            <svg viewBox="0 0 300 310" style={{ width: '100%', maxWidth: 280, display: 'block', margin: '0.5rem auto' }}>
+            <svg viewBox="0 0 380 310" style={{ width: '100%', maxWidth: 340, display: 'block', margin: '0.5rem auto' }}>
                 {webLines.map((w, i) => (
                     <polygon key={`web${i}`} points={w}
                         fill="none" stroke="#253545" strokeWidth={0.75}
@@ -1280,7 +1280,7 @@ const ImageSubmission = () => {
 
                         <div className="help-section">
                             <h3>Analysis</h3>
-                            <p>Upload an image (SVS, TIF, JPG, PNG, BMP) by clicking or dragging into the left panel. The AI pipeline will automatically extract collagen fibers, compute a fibrosis extent percentage, and classify the disease stage via VGG16 + Fuzzy C-Means.</p>
+                            <p>Upload an image (SVS, TIF, JPG, PNG, BMP) by clicking or dragging into the left panel. The AI pipeline will automatically extract collagen fibers via colour deconvolution and compute a fibrosis extent percentage. The original image appears on the left and the fibrosis mask on the right.</p>
                         </div>
 
                         <div className="help-section">
@@ -1289,11 +1289,11 @@ const ImageSubmission = () => {
                         </div>
 
                         <div className="help-section">
-                            <h3>Magnifying Glass & Fine Adjustments</h3>
+                            <h3>Magnifying Glass &amp; Fine Adjustments</h3>
                             <p>Hover over the original image to activate the magnifying glass. Use arrow keys to zoom and adjust the threshold for just the area under observation:</p>
                             <ul className="help-bindings">
-                                <li><kbd>▲</kbd> <kbd>▼</kbd> Zoom in / out</li>
-                                <li><kbd>◀</kbd> <kbd>▶</kbd> Decrease / increase area threshold</li>
+                                <li><kbd>&#9650;</kbd> <kbd>&#9660;</kbd> Zoom in / out</li>
+                                <li><kbd>&#9664;</kbd> <kbd>&#9654;</kbd> Decrease / increase area threshold</li>
                                 <li><kbd>Ctrl+R</kbd> Reset observed area to original threshold</li>
                                 <li><kbd>Ctrl+Z</kbd> Undo all increments made to the last modified area</li>
                                 <li><kbd>Esc</kbd> Close overlays</li>
@@ -1307,13 +1307,13 @@ const ImageSubmission = () => {
 
                         <div className="help-section">
                             <h3>Diagnose</h3>
-                            <p>Once the fibrosis mask is refined to your satisfaction, click <strong>Diagnose</strong> to run the classification pipeline (VGG16 + Fuzzy C-Means) on the refined mask. For large images, each tile is classified individually and results are averaged from the most severe patches.</p>
+                            <p>Classification is a <strong>separate step</strong> from analysis. Once you have refined the fibrosis mask to your satisfaction, click <strong>Diagnose</strong> to run VGG16 feature extraction and Fuzzy C-Means clustering on the refined mask. For large images, each tile is classified individually and results are averaged from the most severe patches.</p>
                             <p>After diagnosis, a radar chart shows probabilistic membership across four fibrosis stages. Use <strong>Re-diagnose</strong> after making further threshold adjustments. <strong>Analyze Patch Results</strong> highlights the five most severe tiles on the mask image with red outlines.</p>
                         </div>
 
                         <div className="help-section">
                             <h3>Exports</h3>
-                            <p><strong>Download CSV</strong> exports the diagnosis result (including classification scores when available). <strong>Save Mask</strong> downloads the current fibrosis mask image (including any threshold adjustments).</p>
+                            <p><strong>Download CSV</strong> exports the fibrosis percentage and classification scores (when available). <strong>Save Mask</strong> downloads the current fibrosis mask image (including any threshold adjustments).</p>
                         </div>
 
                         <div className="help-esc">Press Esc to close</div>

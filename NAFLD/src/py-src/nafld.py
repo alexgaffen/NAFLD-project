@@ -449,7 +449,7 @@ def get_delta_map(cache_key):
     return base64.b64encode(buf.getvalue()).decode('utf-8')
 
 
-def classify_from_mask(cache_key, patch_size=128, top_n=5, progress_callback=None):
+def classify_from_mask(cache_key, patch_size=256, top_n=5, progress_callback=None):
     """
     Run VGG16 + PCA + FCM classification on the current refined B&W mask.
 
@@ -878,7 +878,7 @@ def _select_slide_level(slide, max_dim=8192):
     return len(slide.level_dimensions) - 1
 
 
-def analyze_single_file_patched(file_path, patch_size=128, max_processing_dim=8192, progress_callback=None):
+def analyze_single_file_patched(file_path, patch_size=256, max_processing_dim=8192, progress_callback=None):
     """
     Patch-based analysis for SVS (and large TIF) files.
 
