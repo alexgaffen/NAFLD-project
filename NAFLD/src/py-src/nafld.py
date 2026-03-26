@@ -481,8 +481,9 @@ def classify_from_mask(cache_key, patch_size=256, top_n=5, progress_callback=Non
     mask_np = np.array(mask_pil)
     h, w = mask_np.shape[:2]
 
-    # Original-image tissue mask for the exclusion principle
-    orig_tissue_mask = entry.get('tissue_mask')  # boolean array, same dims as mask
+    # Original-image tissue tile grid for the exclusion principle
+    # (recorded during analyze so the exact same tiles are included/excluded)
+    tissue_tile_grid = entry.get('tissue_tile_grid')  # bool array [rows, cols]
 
     # Determine if we should tile (same heuristic as patched analysis)
     is_large = max(h, w) > 2048
@@ -528,30 +529,25 @@ def classify_from_mask(cache_key, patch_size=256, top_n=5, progress_callback=Non
             if th < 32 or tw < 32:
                 continue
 
-            # ── Exclusion check 1: background from the ORIGINAL image ──
-            # The tissue_mask is True for non-white pixels (sum>50 & mean<220).
-            # Skip tiles where >=50% of the original pixels are white / non-tissue,
-            # carrying the background exclusion principle from the left image.
-            if orig_tissue_mask is not None:
-                tissue_tile = orig_tissue_mask[py:py + th, px:px + tw]
-                white_frac = 1.0 - (np.sum(tissue_tile) / tissue_tile.size)
-                if white_frac >= 0.50:
+            # ── Exclusion: use the same tissue grid from analyze ──
+            # If the grid was recorded during analyze, reuse it exactly so
+            # the same tiles are included/excluded on both images.
+            if tissue_tile_grid is not None:
+                if not tissue_tile_grid[ri, ci]:
                     if progress_callback:
                         progress_callback(current_tile, total_tiles, len(patch_memberships),
                                           grid_rows=num_rows, grid_cols=num_cols,
                                           tile_row=ri, tile_col=ci, is_tissue=False)
                     continue
-
-            # ── Exclusion check 2: mask content ──
-            # Skip tiles that are almost entirely black on the mask itself.
-            # No point sending a solid-black tile through VGG16.
-            gray = np.mean(tile.astype(np.float32), axis=2) if tile.ndim == 3 else tile.astype(np.float32)
-            if np.sum(gray > 128) / gray.size < 0.01:
-                if progress_callback:
-                    progress_callback(current_tile, total_tiles, len(patch_memberships),
-                                      grid_rows=num_rows, grid_cols=num_cols,
-                                      tile_row=ri, tile_col=ci, is_tissue=False)
-                continue
+            else:
+                # Fallback if grid wasn't stored (shouldn't happen for large images)
+                gray = np.mean(tile.astype(np.float32), axis=2) if tile.ndim == 3 else tile.astype(np.float32)
+                if np.sum(gray > 128) / gray.size < 0.01:
+                    if progress_callback:
+                        progress_callback(current_tile, total_tiles, len(patch_memberships),
+                                          grid_rows=num_rows, grid_cols=num_cols,
+                                          tile_row=ri, tile_col=ci, is_tissue=False)
+                    continue
 
             tile_pil = Image.fromarray(tile)
             try:
@@ -997,6 +993,10 @@ def analyze_single_file_patched(file_path, patch_size=256, max_processing_dim=81
         total_tiles = num_rows * num_cols
         current_tile = 0
 
+        # Track which tiles pass the background test so classify_from_mask
+        # can use the exact same inclusion/exclusion grid.
+        tissue_tile_grid = np.zeros((num_rows, num_cols), dtype=bool)
+
         # ── Tile for VGG16 classification — every tile gets classified ──
         for ri, py in enumerate(rows):
             for ci, px in enumerate(cols):
@@ -1015,6 +1015,8 @@ def analyze_single_file_patched(file_path, patch_size=256, max_processing_dim=81
                                           grid_rows=num_rows, grid_cols=num_cols,
                                           tile_row=ri, tile_col=ci, is_tissue=False)
                     continue
+
+                tissue_tile_grid[ri, ci] = True
 
                 # Extract this tile's mask for VGG16
                 tile_mask = full_mask[py:py + ph, px:px + pw_actual]
@@ -1042,6 +1044,11 @@ def analyze_single_file_patched(file_path, patch_size=256, max_processing_dim=81
                                       tile_row=ri, tile_col=ci, is_tissue=True)
 
         print(f"[Patch] {patch_count} tissue patches classified — fibrosis {overall_ratio:.2f}%")
+
+        # Store the tissue tile grid so classify_from_mask uses the same tiles
+        _deconv_entry = _deconv_cache.get(os.path.basename(file_path))
+        if _deconv_entry is not None:
+            _deconv_entry['tissue_tile_grid'] = tissue_tile_grid
 
         # ── Average fuzzy memberships across all patches ──
         if patch_memberships:
