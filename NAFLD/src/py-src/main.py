@@ -50,8 +50,30 @@ upload_file_dict = {}
 
 # Cache analysis results so CSV download doesn't re-run the full pipeline.
 # Keyed by resolved file path → result dict.
-# Invalidated whenever a new file is uploaded.
 _analysis_cache = {}
+
+# Disk-backed metadata directory for CSV downloads (survives across workers/restarts)
+_META_DIR = os.path.join(UPLOAD_FOLDER, '.meta')
+os.makedirs(_META_DIR, exist_ok=True)
+
+def _save_result_meta(filename, result):
+    """Persist the CSV-relevant fields to a small JSON sidecar on disk."""
+    meta = {
+        'status': result.get('status'),
+        'fibrosis_ratio': result.get('fibrosis_ratio'),
+        'membership_scores': result.get('membership_scores'),
+    }
+    path = os.path.join(_META_DIR, f"{filename}.json")
+    with open(path, 'w') as f:
+        json.dump(meta, f)
+
+def _load_result_meta(filename):
+    """Load CSV fields from disk sidecar. Returns dict or None."""
+    path = os.path.join(_META_DIR, f"{filename}.json")
+    if os.path.exists(path):
+        with open(path, 'r') as f:
+            return json.load(f)
+    return None
 
 # Look into restricting access from other endpoints than arent localhost?
 # CORS(app, resources={r"/home": {"origins": "localhost:3000"}})
@@ -71,6 +93,7 @@ def analyze_file(filename):
 
     # Cache the result so CSV download can reuse it
     _analysis_cache[file_path] = result
+    _save_result_meta(filename, result)
 
     return jsonify(result), 200
 
@@ -95,6 +118,8 @@ def analyze_file_stream(filename):
     if not _is_patchable(file_path):
         # Not a patch candidate: run normal analysis and return as a single SSE result event
         result = analyze_single_file(file_path)
+        _analysis_cache[file_path] = result
+        _save_result_meta(filename, result)
         def single_event():
             yield f"data: {json.dumps({'type': 'result', 'data': result})}\n\n"
         return Response(single_event(), mimetype='text/event-stream',
@@ -116,7 +141,8 @@ def analyze_file_stream(filename):
 
     def worker():
         result_holder[0] = analyze_single_file_patched(file_path, progress_callback=on_progress)
-        _analysis_cache[file_path] = result_holder[0]  # cache for CSV download
+        _analysis_cache[file_path] = result_holder[0]
+        _save_result_meta(filename, result_holder[0])
         progress_queue.put({'type': 'done'})
 
     t = threading.Thread(target=worker, daemon=True)
@@ -305,25 +331,23 @@ def classify_mask_file(filename):
 @app.route("/download-single/<filename>", methods=['GET'])
 @login_required
 def download_single_file_csv(filename):
-    # First check the analysis cache by any key that ends with this filename,
-    # because SVS/large files are deleted after processing so resolve_uploaded_file_path
-    # would return None.
+    # Try sources in order: in-memory cache → disk sidecar → re-analyze
     result = None
-    matched_path = None
     for cached_path, cached_result in _analysis_cache.items():
         if os.path.basename(cached_path) == filename or cached_path.endswith(filename):
             result = cached_result
-            matched_path = cached_path
             break
 
     if result is None:
-        # No cached result — try resolving the file and running analysis
+        result = _load_result_meta(filename)
+
+    if result is None:
         file_path = resolve_uploaded_file_path(filename)
         if not file_path:
             return jsonify({'error': 'File not found and no cached analysis available'}), 404
         result = analyze_single_file(file_path)
         _analysis_cache[file_path] = result
-        matched_path = file_path
+        _save_result_meta(filename, result)
 
     if result.get('status') != 'success':
         return jsonify({'error': result.get('message', 'Analysis failed')}), 500
@@ -333,7 +357,6 @@ def download_single_file_csv(filename):
     fibrosis_ratio = float(override_ratio) if override_ratio is not None else result.get('fibrosis_ratio', '')
 
     # Prefer classification result from Diagnose workflow if available
-    from nafld import _deconv_cache
     classify_scores = request.args.get('classify_scores')
     if classify_scores:
         try:
@@ -345,15 +368,14 @@ def download_single_file_csv(filename):
 
     csv_buffer = io.StringIO()
     writer = csv.writer(csv_buffer)
-    writer.writerow(['image_name', 'percentage', 'cluster_label', 'None', 'Perisinusoidal', 'Bridging', 'Cirrosis'])
+    writer.writerow(['image_name', 'extent_percentage', 'None', 'Perisinusoidal', 'Bridging', 'Cirrosis'])
     writer.writerow([
         filename,
         fibrosis_ratio,
-        result.get('cluster_label', ''),
-        membership_scores.get('None', result.get('None', '')),
-        membership_scores.get('Perisinusoidal', result.get('Perisinusoidal', '')),
-        membership_scores.get('Bridging', result.get('Bridging', '')),
-        membership_scores.get('Cirrosis', result.get('Cirrosis', '')),
+        membership_scores.get('None', ''),
+        membership_scores.get('Perisinusoidal', ''),
+        membership_scores.get('Bridging', ''),
+        membership_scores.get('Cirrosis', ''),
     ])
 
     download_name = f"result_{filename}.csv"
@@ -429,9 +451,6 @@ def upload_file():
     save_path = os.path.join(UPLOAD_FOLDER, safe_filename)
     file.save(save_path)
 
-    # Clear analysis cache — new image uploaded
-    _analysis_cache.clear()
-
     return jsonify({
         'message': 'File successfully uploaded',
         'filename': safe_filename
@@ -471,8 +490,6 @@ def upload_largefile():
     print(f"Chunk {resumable_chunk_number}/{total_chunks} for {safe_name}")
 
     if resumable_chunk_number == total_chunks:
-        # Clear analysis cache — new image uploaded
-        _analysis_cache.clear()
         return jsonify({
             "status": "File upload complete",
             "filename": safe_name
