@@ -212,7 +212,7 @@ const FileUploader = () => {
             <ResponsiveContainer width="100%" height={300}>
               <BarChart data={[
                 { name: "None", value: row.None },
-                { name: "Perisinusoidal", value: row.Perisinusoidal },
+                { name: "Periportal", value: row.Perisinusoidal },
                 { name: "Bridging", value: row.Bridging },
                 { name: "Cirrosis", value: row.Cirrosis }
               ]}>

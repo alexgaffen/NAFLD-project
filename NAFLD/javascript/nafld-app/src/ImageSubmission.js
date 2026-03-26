@@ -650,37 +650,30 @@ const ImageSubmission = () => {
     };
     const handleClick = () => { if (!isBusy) fileInputRef.current?.click(); };
 
-    const handleDownloadCsv = async () => {
-        if (!uploadedFilename) { setErrorMessage("No uploaded file available for CSV export."); return; }
-        try {
-            setErrorMessage("");
-            const params = new URLSearchParams();
-            if (adjustedRatio !== null) params.set('fibrosis_ratio', adjustedRatio);
-            if (classificationResult?.membership_scores) {
-                params.set('classify_scores', JSON.stringify(classificationResult.membership_scores));
-            }
-            const qs = params.toString();
-            let csvUrl = `${API_BASE}/download-single/${encodeURIComponent(uploadedFilename)}${qs ? '?' + qs : ''}`;
-            const response = await fetch(csvUrl, { headers: authHeader() });
-            if (!response.ok) throw new Error(`CSV download failed: ${await response.text()}`);
-            const blob = await response.blob();
-            const disposition = response.headers.get('Content-Disposition');
-            let downloadFilename = `${uploadedFilename}.csv`;
-            if (disposition && disposition.includes('filename=')) {
-                downloadFilename = disposition.split('filename=')[1].replace(/"/g, '').trim();
-            }
-            const url = window.URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.setAttribute('download', downloadFilename);
-            document.body.appendChild(link);
-            link.click();
-            link.remove();
-            window.URL.revokeObjectURL(url);
-        } catch (error) {
-            console.error('Error:', error);
-            setErrorMessage(error.message || 'CSV download failed.');
-        }
+    const handleDownloadCsv = () => {
+        const extent = adjustedRatio !== null ? adjustedRatio : fibrosisRatio;
+        const scores = classificationResult?.membership_scores;
+        if (extent === undefined || !scores) { setErrorMessage("Complete a full diagnosis (including clustering) before downloading CSV."); return; }
+        const headers = ['image_name', 'extent_percentage', 'None (F0)', 'Periportal (F1)', 'Bridging (F3)', 'Cirrhosis (F4)'];
+        const values = [
+            image?.name || uploadedFilename,
+            `${Number(extent).toFixed(2)}%`,
+            `${((scores.None || 0) * 100).toFixed(0)}%`,
+            `${((scores.Perisinusoidal || 0) * 100).toFixed(0)}%`,
+            `${((scores.Bridging || 0) * 100).toFixed(0)}%`,
+            `${((scores.Cirrosis || 0) * 100).toFixed(0)}%`
+        ];
+        const csvContent = [headers.join(','), values.join(',')].join('\n');
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        const baseName = image?.name ? image.name.replace(/\.[^.]+$/, '') : 'fibrosis';
+        link.href = url;
+        link.setAttribute('download', `${baseName}_results.csv`);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
     };
 
     const handleDownloadMask = () => {
@@ -710,7 +703,7 @@ const ImageSubmission = () => {
         const N = 4;
         const cats = [
             { key: 'None',            label: 'None',            sub: 'F0' },
-            { key: 'Perisinusoidal',  label: 'Perisinusoidal',  sub: 'F1' },
+            { key: 'Perisinusoidal',  label: 'Periportal',      sub: 'F1' },
             { key: 'Bridging',        label: 'Bridging',        sub: 'F3' },
             { key: 'Cirrosis',        label: 'Cirrhosis',       sub: 'F4' },
         ];
@@ -1082,7 +1075,7 @@ const ImageSubmission = () => {
                     <button
                         className="csv-btn-inline"
                         onClick={handleDownloadCsv}
-                        disabled={!uploadedFilename || isUploading || isAnalyzing}
+                        disabled={!classificationResult?.membership_scores || isUploading || isAnalyzing}
                     >
                         ↓ Download CSV
                     </button>
