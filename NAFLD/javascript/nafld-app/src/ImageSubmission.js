@@ -61,6 +61,13 @@ const ImageSubmission = () => {
     // Classification from refined mask (separate from initial analysis)
     const [classificationResult, setClassificationResult] = useState(null);
     const [isClassifying, setIsClassifying] = useState(false);
+    const [classifyTileGrid, setClassifyTileGrid] = useState(null);
+    const [classifyProgress, setClassifyProgress] = useState(null);
+    const [worstPatchCoords, setWorstPatchCoords] = useState(null);
+    const [showWorstPatches, setShowWorstPatches] = useState(false);
+    const [maskChangedSinceClassify, setMaskChangedSinceClassify] = useState(false);
+    const [filteredImgContentRect, setFilteredImgContentRect] = useState(null);
+    const classifyGridInfo = useRef(null); // { rows, cols } from classification
 
     const displayedResult = analysisResult || previewResult;
 
@@ -84,6 +91,26 @@ const ImageSubmission = () => {
         });
     }, []);
 
+    // Compute where the filtered image renders inside its panel
+    const computeFilteredImgRect = useCallback(() => {
+        const img = filteredImgRef.current;
+        if (!img || !img.naturalWidth) return;
+        const container = img.parentElement;
+        const cw = container.clientWidth;
+        const ch = container.clientHeight;
+        const nw = img.naturalWidth;
+        const nh = img.naturalHeight;
+        const scale = Math.min(cw / nw, ch / nh);
+        const rw = nw * scale;
+        const rh = nh * scale;
+        setFilteredImgContentRect({
+            left: (cw - rw) / 2,
+            top: (ch - rh) / 2,
+            width: rw,
+            height: rh,
+        });
+    }, []);
+
     // Recompute on resize
     useEffect(() => {
         const img = originalImgRef.current;
@@ -92,6 +119,15 @@ const ImageSubmission = () => {
         ro.observe(img.parentElement);
         return () => ro.disconnect();
     }, [computeImgRect, displayedResult]);
+
+    // Recompute filtered image rect on resize
+    useEffect(() => {
+        const img = filteredImgRef.current;
+        if (!img) return;
+        const ro = new ResizeObserver(computeFilteredImgRect);
+        ro.observe(img.parentElement);
+        return () => ro.disconnect();
+    }, [computeFilteredImgRect, displayedResult, adjustedMask]);
 
     // When analysis completes, pick up the auto threshold
     useEffect(() => {
@@ -123,6 +159,8 @@ const ImageSubmission = () => {
                     setAdjustedMask(data.filtered_image);
                     setHasLocalEdits(false);
                     setDeltaMap(null);
+                    setMaskChangedSinceClassify(true);
+                    setShowWorstPatches(false);
                 }
             } catch (e) {
                 console.error('Rethreshold error:', e);
@@ -218,6 +256,8 @@ const ImageSubmission = () => {
                     setAdjustedMask(data.filtered_image);
                     setHasLocalEdits(true);
                     if (data.delta_map) setDeltaMap(data.delta_map);
+                    setMaskChangedSinceClassify(true);
+                    setShowWorstPatches(false);
                 }
             } catch (e) {
                 console.error('Rethreshold area error:', e);
@@ -264,6 +304,8 @@ const ImageSubmission = () => {
                 setAdjustedMask(data.filtered_image);
                 setHasLocalEdits(data.has_local_edits);
                 setDeltaMap(data.delta_map);
+                setMaskChangedSinceClassify(true);
+                setShowWorstPatches(false);
             }
         } catch (e) {
             console.error('Reset area error:', e);
@@ -287,6 +329,8 @@ const ImageSubmission = () => {
                 setAdjustedMask(data.filtered_image);
                 setHasLocalEdits(data.has_local_edits);
                 setDeltaMap(data.delta_map);
+                setMaskChangedSinceClassify(true);
+                setShowWorstPatches(false);
             }
         } catch (e) {
             console.error('Undo area error:', e);
@@ -295,28 +339,65 @@ const ImageSubmission = () => {
         }
     }, [uploadedFilename]);
 
-    // Classify from refined mask
+    // Classify from refined mask (SSE streaming with tile progress)
     const handleClassifyMask = useCallback(async () => {
         if (!uploadedFilename) return;
         setIsClassifying(true);
         setClassificationResult(null);
+        setClassifyTileGrid(null);
+        setClassifyProgress(null);
+        setWorstPatchCoords(null);
+        setShowWorstPatches(false);
+        classifyGridInfo.current = null;
         try {
-            const res = await fetch(
-                `${API_BASE}/classify-mask/${encodeURIComponent(uploadedFilename)}`,
-                { headers: authHeader() }
-            ).then(handleAuthError);
-            if (res.ok) {
-                const data = await res.json();
-                setClassificationResult(data);
-            } else {
-                const err = await res.json().catch(() => ({}));
-                setErrorMessage(err.error || 'Classification failed.');
+            const result = await new Promise((resolve, reject) => {
+                const evtSource = new EventSource(
+                    `${API_BASE}/classify-mask/${encodeURIComponent(uploadedFilename)}?token=${encodeURIComponent(sessionStorage.getItem('access_token') || '')}`
+                );
+                evtSource.onmessage = (event) => {
+                    try {
+                        const msg = JSON.parse(event.data);
+                        if (msg.type === 'progress') {
+                            setClassifyProgress({ current: msg.current, total: msg.total, tissue_patches: msg.tissue_patches });
+                            if (msg.grid_rows !== undefined) {
+                                setClassifyTileGrid(prev => {
+                                    const r = msg.grid_rows, c = msg.grid_cols;
+                                    const tiles = prev && prev.tiles.length === r * c ? [...prev.tiles] : new Array(r * c).fill(0);
+                                    tiles[msg.tile_row * c + msg.tile_col] = msg.is_tissue ? 2 : 1;
+                                    return { rows: r, cols: c, tiles };
+                                });
+                            }
+                        } else if (msg.type === 'result') {
+                            evtSource.close();
+                            resolve(msg.data);
+                        }
+                    } catch (e) {
+                        evtSource.close();
+                        reject(e);
+                    }
+                };
+                evtSource.onerror = () => {
+                    evtSource.close();
+                    reject(new Error('Classification stream connection lost'));
+                };
+            });
+            setClassificationResult(result);
+            if (result.worst_patches) {
+                setWorstPatchCoords(result.worst_patches);
+                classifyGridInfo.current = {
+                    rows: result.grid_rows, cols: result.grid_cols,
+                    imgH: result.img_h, imgW: result.img_w,
+                    patchSize: result.patch_size || 256,
+                };
             }
+            setMaskChangedSinceClassify(false);
         } catch (e) {
             console.error('Classify mask error:', e);
-            setErrorMessage('Unable to reach classification endpoint.');
+            setErrorMessage('Classification failed or connection lost.');
         } finally {
             setIsClassifying(false);
+            setClassifyTileGrid(null);
+            setClassifyProgress(null);
         }
     }, [uploadedFilename]);
 
@@ -435,6 +516,13 @@ const ImageSubmission = () => {
         setPreviewResult(null);
         setAnalysisResult(null);
         setClassificationResult(null);
+        setClassifyTileGrid(null);
+        setClassifyProgress(null);
+        setWorstPatchCoords(null);
+        setShowWorstPatches(false);
+        setMaskChangedSinceClassify(false);
+        setFilteredImgContentRect(null);
+        classifyGridInfo.current = null;
         setUploadedFilename("");
         setUploadProgress(0);
         setTileGrid(null);
@@ -550,10 +638,13 @@ const ImageSubmission = () => {
         if (!uploadedFilename) { setErrorMessage("No uploaded file available for CSV export."); return; }
         try {
             setErrorMessage("");
-            let csvUrl = `${API_BASE}/download-single/${encodeURIComponent(uploadedFilename)}`;
-            if (adjustedRatio !== null) {
-                csvUrl += `?fibrosis_ratio=${adjustedRatio}`;
+            const params = new URLSearchParams();
+            if (adjustedRatio !== null) params.set('fibrosis_ratio', adjustedRatio);
+            if (classificationResult?.membership_scores) {
+                params.set('classify_scores', JSON.stringify(classificationResult.membership_scores));
             }
+            const qs = params.toString();
+            let csvUrl = `${API_BASE}/download-single/${encodeURIComponent(uploadedFilename)}${qs ? '?' + qs : ''}`;
             const response = await fetch(csvUrl, { headers: authHeader() });
             if (!response.ok) throw new Error(`CSV download failed: ${await response.text()}`);
             const blob = await response.blob();
@@ -845,7 +936,7 @@ const ImageSubmission = () => {
                     >
                         <span className="img-label accent">fibrosisai Mask</span>
                         {displayedMaskSrc ? (
-                            <img ref={filteredImgRef} alt="Fibrosis mask" src={displayedMaskSrc} className="preview-image" draggable="false" onDragStart={(e) => e.preventDefault()} />
+                            <img ref={filteredImgRef} onLoad={computeFilteredImgRect} alt="Fibrosis mask" src={displayedMaskSrc} className="preview-image" draggable="false" onDragStart={(e) => e.preventDefault()} />
                         ) : (
                             <div className="placeholder-text">Fibrosis mask appears after analysis</div>
                         )}
@@ -855,6 +946,61 @@ const ImageSubmission = () => {
                             <button className="download-mask-btn" onClick={handleDownloadMask} title="Download fibrosis mask">
                                 ↓ Save Mask
                             </button>
+                        )}
+
+                        {/* Classify scan tile overlay — on filtered image during classification */}
+                        {classifyTileGrid && isClassifying && filteredImgContentRect && (
+                            <div className="tile-overlay" style={{
+                                left: filteredImgContentRect.left,
+                                top: filteredImgContentRect.top,
+                                width: filteredImgContentRect.width,
+                                height: filteredImgContentRect.height,
+                                gridTemplateColumns: `repeat(${classifyTileGrid.cols}, 1fr)`,
+                                gridTemplateRows: `repeat(${classifyTileGrid.rows}, 1fr)`,
+                            }}>
+                                {classifyTileGrid.tiles.map((s, i) => (
+                                    <div key={i} className={`tile-cell ${s === 2 ? 'tile-tissue' : s === 1 ? 'tile-bg' : 'tile-pending'}`} />
+                                ))}
+                            </div>
+                        )}
+
+                        {/* Classify progress bar */}
+                        {isClassifying && classifyProgress && (
+                            <div className="img-progress-bar-track">
+                                <div
+                                    className="img-progress-bar-fill"
+                                    style={{ width: `${Math.round((classifyProgress.current / classifyProgress.total) * 100)}%` }}
+                                />
+                            </div>
+                        )}
+
+                        {/* Red outlines for worst patches — pixel-accurate positioning */}
+                        {showWorstPatches && worstPatchCoords && filteredImgContentRect && classifyGridInfo.current && (
+                            <div className="worst-patches-overlay" style={{
+                                left: filteredImgContentRect.left,
+                                top: filteredImgContentRect.top,
+                                width: filteredImgContentRect.width,
+                                height: filteredImgContentRect.height,
+                            }}>
+                                {worstPatchCoords.map((p, i) => {
+                                    const gi = classifyGridInfo.current;
+                                    // Map pixel coords to display coords using actual image dimensions
+                                    const scaleX = filteredImgContentRect.width / gi.imgW;
+                                    const scaleY = filteredImgContentRect.height / gi.imgH;
+                                    const patchW = Math.min(gi.patchSize, gi.imgW - p.px) * scaleX;
+                                    const patchH = Math.min(gi.patchSize, gi.imgH - p.py) * scaleY;
+                                    return (
+                                        <div key={i} className="worst-patch-rect" style={{
+                                            left: p.px * scaleX,
+                                            top: p.py * scaleY,
+                                            width: patchW,
+                                            height: patchH,
+                                        }}>
+                                            <span className="worst-patch-rank">{i + 1}</span>
+                                        </div>
+                                    );
+                                })}
+                            </div>
                         )}
                     </div>
                 </div>
@@ -1001,6 +1147,8 @@ const ImageSubmission = () => {
                                         setAdjustedMask(null);
                                         setHasLocalEdits(false);
                                         setDeltaMap(null);
+                                        setMaskChangedSinceClassify(true);
+                                        setShowWorstPatches(false);
                                         fetch(`${API_BASE}/rethreshold/${encodeURIComponent(uploadedFilename)}?threshold=${autoThreshold}`, { headers: authHeader() })
                                             .catch(() => {});
                                     };
@@ -1020,21 +1168,23 @@ const ImageSubmission = () => {
                     <div className="report-card" style={{ border: '1px solid #4ecdc4' }}>
                         <p className="report-label">Disease Classification</p>
 
+                        {/* Always show hint to fine-tune before diagnosing */}
+                        <div className="classify-prompt">
+                            <p className="classify-hint">
+                                Fine-tune the fibrosis mask using the baseline threshold slider and magnifying glass area adjustments. Once the mask accurately represents the fibrosis, click below to classify.
+                            </p>
+                        </div>
+
                         {!classificationResult && !isClassifying && (
-                            <div className="classify-prompt">
-                                <p className="classify-hint">
-                                    Fine-tune the fibrosis mask using the baseline threshold slider and magnifying glass area adjustments. Once the mask accurately represents the fibrosis, click below to classify.
-                                </p>
-                                <button className="classify-btn" onClick={handleClassifyMask}>
-                                    Diagnose
-                                </button>
-                            </div>
+                            <button className="classify-btn" onClick={handleClassifyMask}>
+                                Diagnose
+                            </button>
                         )}
 
                         {isClassifying && (
                             <div className="classify-loading">
                                 <span className="classify-spinner" />
-                                <span>Classifying refined mask...</span>
+                                <span>Classifying refined mask{classifyProgress ? ` (${classifyProgress.current}/${classifyProgress.total})` : ''}...</span>
                             </div>
                         )}
 
@@ -1050,9 +1200,24 @@ const ImageSubmission = () => {
                                     <strong style={{ color: '#f7b731' }}>Gradual Spectrum:</strong>{' '}
                                     Fibrosis categories overlap continuously. FCM assigns probabilistic membership across 4 clusters rather than a hard category.
                                 </p>
-                                <button className="reclassify-btn" onClick={handleClassifyMask}>
-                                    Re-diagnose
-                                </button>
+                                <div className="classify-actions-row">
+                                    <button
+                                        className="reclassify-btn"
+                                        onClick={handleClassifyMask}
+                                        disabled={!maskChangedSinceClassify}
+                                        title={!maskChangedSinceClassify ? 'Make threshold adjustments first' : 'Re-run classification on updated mask'}
+                                    >
+                                        Re-diagnose
+                                    </button>
+                                    {worstPatchCoords && worstPatchCoords.length > 0 && (
+                                        <button
+                                            className="analyze-patches-btn"
+                                            onClick={() => setShowWorstPatches(prev => !prev)}
+                                        >
+                                            {showWorstPatches ? 'Hide Patch Results' : 'Analyze Patch Results'}
+                                        </button>
+                                    )}
+                                </div>
                             </>
                         )}
                     </div>

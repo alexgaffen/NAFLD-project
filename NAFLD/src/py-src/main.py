@@ -259,25 +259,72 @@ def undo_area_file(filename):
 @app.route("/classify-mask/<filename>", methods=['GET'])
 @login_required
 def classify_mask_file(filename):
-    """Run VGG16 + FCM classification on the current refined B&W mask."""
-    result = classify_from_mask(filename)
-    if result is None:
+    """SSE endpoint — streams patch scanning progress then the final classification result."""
+    from nafld import _deconv_cache
+    entry = _deconv_cache.get(filename)
+    if entry is None:
         return jsonify({'error': 'No cached analysis data. Analyze the image first.'}), 404
-    return jsonify(result), 200
+
+    progress_queue = queue.Queue()
+
+    def on_progress(current, total, tissue_count, **kwargs):
+        msg = {
+            'type': 'progress',
+            'current': current,
+            'total': total,
+            'tissue_patches': tissue_count,
+        }
+        msg.update(kwargs)
+        progress_queue.put(msg)
+
+    result_holder = [None]
+
+    def worker():
+        result_holder[0] = classify_from_mask(filename, progress_callback=on_progress)
+        progress_queue.put({'type': 'done'})
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+
+    def generate():
+        while True:
+            try:
+                msg = progress_queue.get(timeout=300)
+            except queue.Empty:
+                break
+            if msg['type'] == 'done':
+                yield f"data: {json.dumps({'type': 'result', 'data': result_holder[0]})}\n\n"
+                break
+            else:
+                yield f"data: {json.dumps(msg)}\n\n"
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
 @app.route("/download-single/<filename>", methods=['GET'])
 @login_required
 def download_single_file_csv(filename):
-    file_path = resolve_uploaded_file_path(filename)
-    if not file_path:
-        return jsonify({'error': 'File not found'}), 404
+    # First check the analysis cache by any key that ends with this filename,
+    # because SVS/large files are deleted after processing so resolve_uploaded_file_path
+    # would return None.
+    result = None
+    matched_path = None
+    for cached_path, cached_result in _analysis_cache.items():
+        if os.path.basename(cached_path) == filename or cached_path.endswith(filename):
+            result = cached_result
+            matched_path = cached_path
+            break
 
-    # Use cached result if available, otherwise run analysis
-    result = _analysis_cache.get(file_path)
     if result is None:
+        # No cached result — try resolving the file and running analysis
+        file_path = resolve_uploaded_file_path(filename)
+        if not file_path:
+            return jsonify({'error': 'File not found and no cached analysis available'}), 404
         result = analyze_single_file(file_path)
         _analysis_cache[file_path] = result
+        matched_path = file_path
+
     if result.get('status') != 'success':
         return jsonify({'error': result.get('message', 'Analysis failed')}), 500
 
@@ -285,13 +332,22 @@ def download_single_file_csv(filename):
     override_ratio = request.args.get('fibrosis_ratio')
     fibrosis_ratio = float(override_ratio) if override_ratio is not None else result.get('fibrosis_ratio', '')
 
-    membership_scores = result.get('membership_scores') or {}
+    # Prefer classification result from Diagnose workflow if available
+    from nafld import _deconv_cache
+    classify_scores = request.args.get('classify_scores')
+    if classify_scores:
+        try:
+            membership_scores = json.loads(classify_scores)
+        except (json.JSONDecodeError, TypeError):
+            membership_scores = result.get('membership_scores') or {}
+    else:
+        membership_scores = result.get('membership_scores') or {}
 
     csv_buffer = io.StringIO()
     writer = csv.writer(csv_buffer)
     writer.writerow(['image_name', 'percentage', 'cluster_label', 'None', 'Perisinusoidal', 'Bridging', 'Cirrosis'])
     writer.writerow([
-        os.path.basename(file_path),
+        filename,
         fibrosis_ratio,
         result.get('cluster_label', ''),
         membership_scores.get('None', result.get('None', '')),
@@ -300,7 +356,7 @@ def download_single_file_csv(filename):
         membership_scores.get('Cirrosis', result.get('Cirrosis', '')),
     ])
 
-    download_name = f"result_{os.path.basename(file_path)}.csv"
+    download_name = f"result_{filename}.csv"
     response = Response(csv_buffer.getvalue(), mimetype='text/csv')
     response.headers['Content-Disposition'] = f'attachment; filename="{download_name}"'
     return response

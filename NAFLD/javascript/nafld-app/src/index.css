@@ -1049,7 +1049,6 @@ html, body, #root {
   animation: loadingSpin 0.8s linear infinite;
 }
 .reclassify-btn {
-  width: 100%;
   margin-top: 0.5rem;
   padding: 0.45rem 0.8rem;
   border: 1px solid #3a4f63;
@@ -1058,11 +1057,71 @@ html, body, #root {
   color: #8a9bae;
   font-size: 0.72rem;
   cursor: pointer;
-  transition: color 0.2s, border-color 0.2s;
+  transition: color 0.2s, border-color 0.2s, opacity 0.2s;
 }
-.reclassify-btn:hover {
+.reclassify-btn:hover:not(:disabled) {
   color: #4ecdc4;
   border-color: #4ecdc4;
+}
+.reclassify-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* Row for re-diagnose + analyze patches buttons */
+.classify-actions-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.classify-actions-row .reclassify-btn,
+.classify-actions-row .analyze-patches-btn {
+  flex: 1;
+}
+
+/* Analyze Patch Results button */
+.analyze-patches-btn {
+  padding: 0.45rem 0.8rem;
+  border: 1px solid #e74c3c;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: #e74c3c;
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+.analyze-patches-btn:hover {
+  background: rgba(231, 76, 60, 0.12);
+  color: #ff6b5a;
+}
+
+/* Worst patches overlay on filtered image */
+.worst-patches-overlay {
+  position: absolute;
+  pointer-events: none;
+  z-index: 4;
+}
+.worst-patch-rect {
+  position: absolute;
+  border: 2.5px solid #e74c3c;
+  box-shadow: 0 0 6px rgba(231, 76, 60, 0.5);
+  box-sizing: border-box;
+}
+.worst-patch-rank {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  background: #e74c3c;
+  color: #fff;
+  font-size: 0.6rem;
+  font-weight: 700;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  line-height: 1;
 }
 
 /* ── Login screen ── */

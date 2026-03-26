@@ -449,7 +449,7 @@ def get_delta_map(cache_key):
     return base64.b64encode(buf.getvalue()).decode('utf-8')
 
 
-def classify_from_mask(cache_key, patch_size=256, top_n=5):
+def classify_from_mask(cache_key, patch_size=256, top_n=5, progress_callback=None):
     """
     Run VGG16 + PCA + FCM classification on the current refined B&W mask.
 
@@ -460,7 +460,16 @@ def classify_from_mask(cache_key, patch_size=256, top_n=5):
 
     For small images the whole mask is classified in a single pass.
 
-    Returns a dict with cluster_label, membership_scores, patch_count, etc.
+    The tissue_mask from the original analysis (left image) is used to
+    determine which tiles to skip — carrying the exclusion principle from
+    the original PSR staining over to the mask classification.
+
+    progress_callback(current_tile, total_tiles, tissue_count,
+                      grid_rows, grid_cols, tile_row, tile_col, is_tissue)
+    is called after every tile so the frontend can show live scanning.
+
+    Returns a dict with cluster_label, membership_scores, patch_count,
+    worst_patches (list of {row,col,py,px} dicts for the top-N tiles),
     or None when no cached data is available.
     """
     entry = _deconv_cache.get(cache_key)
@@ -471,6 +480,9 @@ def classify_from_mask(cache_key, patch_size=256, top_n=5):
     mask_pil, _, _, _ = _recompute_mask(entry)
     mask_np = np.array(mask_pil)
     h, w = mask_np.shape[:2]
+
+    # Original-image tissue mask for the exclusion principle
+    orig_tissue_mask = entry.get('tissue_mask')  # boolean array, same dims as mask
 
     # Determine if we should tile (same heuristic as patched analysis)
     is_large = max(h, w) > 2048
@@ -500,18 +512,45 @@ def classify_from_mask(cache_key, patch_size=256, top_n=5):
     # ── Patch-based classification for large images ──
     rows_range = list(range(0, h, patch_size))
     cols_range = list(range(0, w, patch_size))
-    patch_memberships = []
+    num_rows = len(rows_range)
+    num_cols = len(cols_range)
+    total_tiles = num_rows * num_cols
+    current_tile = 0
 
-    for py in rows_range:
-        for px in cols_range:
+    patch_memberships = []
+    patch_coords = []  # (row_idx, col_idx, py, px) for each classified tile
+
+    for ri, py in enumerate(rows_range):
+        for ci, px in enumerate(cols_range):
+            current_tile += 1
             tile = mask_np[py:py + patch_size, px:px + patch_size]
             th, tw = tile.shape[:2]
             if th < 32 or tw < 32:
                 continue
 
-            # Skip tiles that are entirely black (no fibrosis)
+            # ── Exclusion check 1: background from the ORIGINAL image ──
+            # The tissue_mask is True for non-white pixels (sum>50 & mean<220).
+            # Skip tiles where >=50% of the original pixels are white / non-tissue,
+            # carrying the background exclusion principle from the left image.
+            if orig_tissue_mask is not None:
+                tissue_tile = orig_tissue_mask[py:py + th, px:px + tw]
+                white_frac = 1.0 - (np.sum(tissue_tile) / tissue_tile.size)
+                if white_frac >= 0.50:
+                    if progress_callback:
+                        progress_callback(current_tile, total_tiles, len(patch_memberships),
+                                          grid_rows=num_rows, grid_cols=num_cols,
+                                          tile_row=ri, tile_col=ci, is_tissue=False)
+                    continue
+
+            # ── Exclusion check 2: mask content ──
+            # Skip tiles that are almost entirely black on the mask itself.
+            # No point sending a solid-black tile through VGG16.
             gray = np.mean(tile.astype(np.float32), axis=2) if tile.ndim == 3 else tile.astype(np.float32)
             if np.sum(gray > 128) / gray.size < 0.01:
+                if progress_callback:
+                    progress_callback(current_tile, total_tiles, len(patch_memberships),
+                                      grid_rows=num_rows, grid_cols=num_cols,
+                                      tile_row=ri, tile_col=ci, is_tissue=False)
                 continue
 
             tile_pil = Image.fromarray(tile)
@@ -526,6 +565,7 @@ def classify_from_mask(cache_key, patch_size=256, top_n=5):
                         u_merged[dst] += u[src]
                     u = u_merged
                 patch_memberships.append([float(u[i][0]) for i in range(4)])
+                patch_coords.append({'row': ri, 'col': ci, 'py': py, 'px': px})
             except Exception as e:
                 print(f"[classify_from_mask] Patch ({py},{px}) failed: {e}")
             finally:
@@ -533,6 +573,11 @@ def classify_from_mask(cache_key, patch_size=256, top_n=5):
 
             if len(patch_memberships) % 10 == 0:
                 gc.collect()
+
+            if progress_callback:
+                progress_callback(current_tile, total_tiles, len(patch_memberships),
+                                  grid_rows=num_rows, grid_cols=num_cols,
+                                  tile_row=ri, tile_col=ci, is_tissue=True)
 
     if not patch_memberships:
         return {"status": "error", "message": "No classifiable tiles found in mask"}
@@ -549,6 +594,9 @@ def classify_from_mask(cache_key, patch_size=256, top_n=5):
     label_text = cluster_lookup_table.get(label_idx, f"Unknown Cluster {label_idx}")
     scores = {membership_column_names[i]: float(avg_memberships[i]) for i in range(4)}
 
+    # Collect worst patch coordinates for frontend overlay
+    worst_patches = [patch_coords[i] for i in top_indices]
+
     print(f"[classify_from_mask] {len(patch_memberships)} tiles classified, "
           f"top-{min(top_n, len(patch_memberships))} worst averaged → {label_text}")
 
@@ -558,6 +606,12 @@ def classify_from_mask(cache_key, patch_size=256, top_n=5):
         "membership_scores": scores,
         "patch_count": len(patch_memberships),
         "top_n_used": min(top_n, len(patch_memberships)),
+        "worst_patches": worst_patches,
+        "grid_rows": num_rows,
+        "grid_cols": num_cols,
+        "img_h": h,
+        "img_w": w,
+        "patch_size": patch_size,
         **scores,
     }
 
