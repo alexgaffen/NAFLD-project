@@ -196,19 +196,54 @@ def _find_threshold_by_descent(red_stain, tissue_mask, num_steps=100, jump_facto
 
 
 def fibrosis_filter(window, stain_matrix=None):
+    # ── Default: simple fixed-threshold method ──
+    _temp_stain_matrix = np.array([[0.39, 0.39, 0.39],
+                                   [0.560, 0.474, 0.447],
+                                   [0.29, 0.33, 0.29]])
+
+    img_array = np.array(window)
+    img_float = img_array.astype(np.float32) / 255.0
+    stains = np.dot(-np.log(img_float + np.finfo(float).eps), _temp_stain_matrix.T)
+    red_stain = stains[:, :, 0]
+
+    mask = (red_stain > 0.9) & (img_array.sum(axis=-1) > 50)
+
+    binary_mask = np.zeros(img_array.shape[:2], dtype=np.uint8)
+    binary_mask[mask] = 255
+
+    total_selected_pixels = int(np.sum(binary_mask == 255))
+    tissue_mask = img_array.sum(axis=-1) > 50
+    tissue_pixel_count = int(np.sum(tissue_mask))
+    if tissue_pixel_count > 0:
+        selected_ratio = (total_selected_pixels / tissue_pixel_count) * 100
+    else:
+        selected_ratio = 0.0
+
+    # If extent >= 30%, rerun with the adaptive threshold method
+    if selected_ratio >= 30.0:
+        print(f"[fibrosis_filter] Extent {selected_ratio:.1f}% >= 30%, falling back to adaptive threshold method")
+        return _fibrosis_filter_original(window, stain_matrix)
+
+    result_image = np.zeros_like(img_array)
+    result_image[binary_mask == 255] = [255, 255, 255]
+    result_image_pil = Image.fromarray(result_image)
+
+    thresh = 0.9  # fixed threshold for this method
+    return result_image_pil, total_selected_pixels, selected_ratio, tissue_pixel_count, thresh
+
+
+def _fibrosis_filter_original(window, stain_matrix=None):
+    """ORIGINAL METHOD — commented out temporarily, kept for easy restore."""
     if stain_matrix is None:
         stain_matrix = globals()['stain_matrix']
 
     img_array = np.array(window)
 
     # ── Brightness normalization ───────────────────────────────
-    # Stretch tissue pixel intensities to a consistent range so
-    # that brighter/darker exposures produce the same OD values.
-    # Target: tissue median ≈ 160  (typical well-lit PSR slide)
     tissue_px = img_array[(img_array.sum(axis=-1) > 50) & (np.mean(img_array, axis=2) < 240)]
     if tissue_px.size > 0:
         current_median = float(np.median(tissue_px))
-        if current_median > 10:  # avoid division by near-zero
+        if current_median > 10:
             target_median = 160.0
             scale = target_median / current_median
             img_norm = np.clip(img_array.astype(np.float32) * scale, 0, 255).astype(np.uint8)
@@ -219,32 +254,20 @@ def fibrosis_filter(window, stain_matrix=None):
         img_norm = img_array
 
     img_float = img_norm.astype(np.float32) / 255.0
-    #perform color deconv
     stains = np.dot(-np.log(img_float + np.finfo(float).eps), stain_matrix.T)
-    #Select the stain for red regions
     red_stain = stains[:, :, 0]
 
-    # Tissue mask: exclude white background and very dark pixels (on normalized image)
     tissue_mask = (img_norm.sum(axis=-1) > 50) & (np.mean(img_norm, axis=2) < 220)
 
-    # Descending threshold sweep — finds where red collagen ends
-    # and brown parenchyma begins
     thresh = _find_threshold_by_descent(red_stain, tissue_mask)
 
     mask = (red_stain > thresh) & tissue_mask
     mask = mask.astype(np.uint8) * 255
 
-    # ── Morphological opening ──────────────────────────────────
-    # Remove isolated small clusters of pixels (noise / faint staining
-    # of portal structures).  A 3×3 elliptical kernel removes objects
-    # smaller than ~3 px across, matching QuPath's behaviour of only
-    # counting contiguous collagen regions.
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
     total_selected_pixels = np.sum(mask == 255)
-    # Use tissue pixels (not total pixels) as denominator so white
-    # background doesn't dilute the extent calculation.
     tissue_pixel_count = int(np.sum(tissue_mask))
     if tissue_pixel_count > 0:
         selected_ratio = (total_selected_pixels / tissue_pixel_count) * 100
