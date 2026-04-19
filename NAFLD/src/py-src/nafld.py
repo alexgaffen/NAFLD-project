@@ -196,7 +196,12 @@ def _find_threshold_by_descent(red_stain, tissue_mask, num_steps=100, jump_facto
 
 
 def fibrosis_filter(window, stain_matrix=None):
-    # ── Default: simple fixed-threshold method ──
+    # Always use the adaptive descending-threshold method.
+    return _fibrosis_filter_original(window, stain_matrix)
+
+
+def _fibrosis_filter_simple(window, stain_matrix=None):
+    """Simple fixed-threshold method (kept for reference / fallback)."""
     _temp_stain_matrix = np.array([[0.39, 0.39, 0.39],
                                    [0.560, 0.474, 0.447],
                                    [0.29, 0.33, 0.29]])
@@ -219,16 +224,11 @@ def fibrosis_filter(window, stain_matrix=None):
     else:
         selected_ratio = 0.0
 
-    # If extent >= 30%, rerun with the adaptive threshold method
-    if selected_ratio >= 30.0:
-        print(f"[fibrosis_filter] Extent {selected_ratio:.1f}% >= 30%, falling back to adaptive threshold method")
-        return _fibrosis_filter_original(window, stain_matrix)
-
     result_image = np.zeros_like(img_array)
     result_image[binary_mask == 255] = [255, 255, 255]
     result_image_pil = Image.fromarray(result_image)
 
-    thresh = 0.9  # fixed threshold for this method
+    thresh = 0.9
     return result_image_pil, total_selected_pixels, selected_ratio, tissue_pixel_count, thresh
 
 

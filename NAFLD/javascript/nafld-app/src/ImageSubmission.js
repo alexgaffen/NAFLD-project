@@ -719,6 +719,9 @@ const ImageSubmission = () => {
                 v, label: c.label, sub: c.sub, angle: a, idx: i,
             };
         });
+        // Find the dominant (highest-membership) category
+        const maxV = Math.max(...pts.map(p => p.v));
+        const dominantIdx = pts.findIndex(p => p.v === maxV);
         const poly = pts.map(p => `${p.x},${p.y}`).join(' ');
         // web lines (pentagons at each ring)
         const rings = [0.25, 0.5, 0.75, 1.0];
@@ -729,40 +732,76 @@ const ImageSubmission = () => {
             }).join(' ');
             return webPts;
         });
+        const dominant = pts[dominantIdx];
         return (
-            <svg viewBox="0 0 380 310" style={{ width: '100%', maxWidth: 340, display: 'block', margin: '0.5rem auto' }}>
-                {webLines.map((w, i) => (
-                    <polygon key={`web${i}`} points={w}
-                        fill="none" stroke="#253545" strokeWidth={0.75}
-                        strokeDasharray={rings[i] < 1 ? '4 4' : 'none'} />
-                ))}
-                {pts.map((p, i) => (
-                    <line key={`ax${i}`} x1={cx} y1={cy} x2={p.ex} y2={p.ey}
-                        stroke="#4ecdc4" strokeWidth={1.5} opacity={0.45} />
-                ))}
-                <polygon points={poly} fill="rgba(78,205,196,0.22)" stroke="#4ecdc4" strokeWidth={2} />
-                {pts.map((p, i) => (
-                    <circle key={`dot${i}`} cx={p.x} cy={p.y} r={4.5}
-                        fill="#0f1923" stroke="#4ecdc4" strokeWidth={2} />
-                ))}
-                {pts.map((p) => {
-                    const a = p.angle;
-                    const cos = Math.cos(a), sin = Math.sin(a);
-                    const isTop = sin < -0.3, isBot = sin > 0.3, isLeft = cos < -0.3, isRight = cos > 0.3;
-                    const anchor = isRight ? 'start' : isLeft ? 'end' : 'middle';
-                    const dx = isRight ? 14 : isLeft ? -14 : 0;
-                    const dy1 = isTop ? -22 : isBot ? 18 : -6;
-                    const dy2 = dy1 + 12;
-                    return (
-                        <g key={`lbl${p.idx}`}>
-                            <text x={p.ex + dx} y={p.ey + dy1} fill="#fff" fontSize="15" fontWeight="700"
-                                textAnchor={anchor}>{`${(p.v * 100).toFixed(0)}%`}</text>
-                            <text x={p.ex + dx} y={p.ey + dy2} fill="#8a9bae" fontSize="12"
-                                textAnchor={anchor}>{p.label}</text>
-                        </g>
-                    );
-                })}
-            </svg>
+            <>
+                {/* Dominant-class banner */}
+                {dominant && (
+                    <div className="dominant-class-banner">
+                        <span className="dominant-class-tag">PRIMARY CLASSIFICATION</span>
+                        <div className="dominant-class-row">
+                            <span className="dominant-class-label">{dominant.label}</span>
+                            <span className="dominant-class-stage">({dominant.sub})</span>
+                            <span className="dominant-class-pct">{(dominant.v * 100).toFixed(0)}%</span>
+                        </div>
+                    </div>
+                )}
+                <svg viewBox="0 0 380 310" style={{ width: '100%', maxWidth: 340, display: 'block', margin: '0.5rem auto' }}>
+                    <defs>
+                        <radialGradient id="dominantGlow" cx="50%" cy="50%" r="50%">
+                            <stop offset="0%" stopColor="#f7b731" stopOpacity="0.55" />
+                            <stop offset="100%" stopColor="#f7b731" stopOpacity="0" />
+                        </radialGradient>
+                    </defs>
+                    {webLines.map((w, i) => (
+                        <polygon key={`web${i}`} points={w}
+                            fill="none" stroke="#253545" strokeWidth={0.75}
+                            strokeDasharray={rings[i] < 1 ? '4 4' : 'none'} />
+                    ))}
+                    {pts.map((p, i) => (
+                        <line key={`ax${i}`} x1={cx} y1={cy} x2={p.ex} y2={p.ey}
+                            stroke={i === dominantIdx ? '#f7b731' : '#4ecdc4'}
+                            strokeWidth={i === dominantIdx ? 2.5 : 1.5}
+                            opacity={i === dominantIdx ? 0.85 : 0.45} />
+                    ))}
+                    <polygon points={poly} fill="rgba(78,205,196,0.22)" stroke="#4ecdc4" strokeWidth={2} />
+                    {/* Dominant-vertex glow */}
+                    {dominant && dominant.v > 0 && (
+                        <circle cx={dominant.x} cy={dominant.y} r={18}
+                            fill="url(#dominantGlow)" />
+                    )}
+                    {pts.map((p, i) => (
+                        <circle key={`dot${i}`} cx={p.x} cy={p.y}
+                            r={i === dominantIdx ? 7 : 4.5}
+                            fill={i === dominantIdx ? '#f7b731' : '#0f1923'}
+                            stroke={i === dominantIdx ? '#f7b731' : '#4ecdc4'}
+                            strokeWidth={i === dominantIdx ? 2.5 : 2} />
+                    ))}
+                    {pts.map((p) => {
+                        const a = p.angle;
+                        const cos = Math.cos(a), sin = Math.sin(a);
+                        const isTop = sin < -0.3, isBot = sin > 0.3, isLeft = cos < -0.3, isRight = cos > 0.3;
+                        const anchor = isRight ? 'start' : isLeft ? 'end' : 'middle';
+                        const dx = isRight ? 14 : isLeft ? -14 : 0;
+                        const dy1 = isTop ? -22 : isBot ? 18 : -6;
+                        const dy2 = dy1 + 12;
+                        const isDom = p.idx === dominantIdx;
+                        return (
+                            <g key={`lbl${p.idx}`}>
+                                <text x={p.ex + dx} y={p.ey + dy1}
+                                    fill={isDom ? '#f7b731' : '#fff'}
+                                    fontSize={isDom ? '17' : '15'} fontWeight="700"
+                                    textAnchor={anchor}>{`${(p.v * 100).toFixed(0)}%`}</text>
+                                <text x={p.ex + dx} y={p.ey + dy2}
+                                    fill={isDom ? '#f7b731' : '#8a9bae'}
+                                    fontSize="12"
+                                    fontWeight={isDom ? '700' : '400'}
+                                    textAnchor={anchor}>{p.label}</text>
+                            </g>
+                        );
+                    })}
+                </svg>
+            </>
         );
     };
 

@@ -394,6 +394,48 @@ html, body, #root {
   border-radius: 0.5rem;
   padding: 0.65rem 0.85rem;
 }
+
+/* Dominant-class banner above the radar chart */
+.dominant-class-banner {
+  background: linear-gradient(135deg, rgba(247, 183, 49, 0.18) 0%, rgba(247, 183, 49, 0.06) 100%);
+  border: 1px solid rgba(247, 183, 49, 0.55);
+  border-radius: 0.5rem;
+  padding: 0.55rem 0.85rem;
+  margin: 0.25rem 0 0.6rem;
+  box-shadow: 0 0 12px rgba(247, 183, 49, 0.18);
+}
+.dominant-class-tag {
+  display: block;
+  font-size: 0.65rem;
+  letter-spacing: 0.12em;
+  font-weight: 700;
+  color: #f7b731;
+  opacity: 0.85;
+  margin-bottom: 0.2rem;
+}
+.dominant-class-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+.dominant-class-label {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.01em;
+}
+.dominant-class-stage {
+  font-size: 0.95rem;
+  color: #f7b731;
+  font-weight: 600;
+}
+.dominant-class-pct {
+  margin-left: auto;
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #f7b731;
+  font-variant-numeric: tabular-nums;
+}
 .report-label {
   font-size: 0.85rem;
   color: #fff;
