@@ -224,6 +224,156 @@ html, body, #root {
   color: #4ecdc4;
 }
 
+.excluded-toggle-btn {
+  background: none;
+  border: 1px solid #4cd964;
+  color: #4cd964;
+  font-size: 0.65rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.2s, color 0.2s;
+}
+.excluded-toggle-btn:hover:not(:disabled) {
+  background: rgba(76, 217, 100, 0.15);
+}
+.excluded-toggle-btn.active {
+  background: rgba(76, 217, 100, 0.2);
+}
+.excluded-toggle-btn:disabled { opacity: 0.6; cursor: wait; }
+
+/* Indeterminate scanning bar for the extent-calculation card */
+.extent-scan-track {
+  position: relative;
+  height: 6px;
+  margin-bottom: 0.5rem;
+  background: rgba(78, 205, 196, 0.15);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.extent-scan-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 35%;
+  background: linear-gradient(90deg, transparent, #4ecdc4, transparent);
+  animation: extent-scan-slide 1.4s ease-in-out infinite;
+}
+@keyframes extent-scan-slide {
+  0%   { left: -35%; }
+  100% { left: 100%; }
+}
+.extent-dots::after {
+  content: '';
+  display: inline-block;
+  width: 1.2em;
+  text-align: left;
+  animation: extent-dots 1.2s steps(4, end) infinite;
+}
+@keyframes extent-dots {
+  0%   { content: ''; }
+  25%  { content: '.'; }
+  50%  { content: '..'; }
+  75%  { content: '...'; }
+  100% { content: ''; }
+}
+
+/* ── Magnifier inspection attachments (Q key) ── */
+.mag-q-hint {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  background: rgba(15, 25, 35, 0.85);
+  color: #4ecdc4;
+  font-size: 0.6rem;
+  padding: 2px 5px;
+  border-radius: 3px;
+  border: 1px solid rgba(78,205,196,0.4);
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  pointer-events: none;
+  letter-spacing: 0.3px;
+}
+.mag-q-hint kbd {
+  background: #4ecdc4;
+  color: #0e1a26;
+  padding: 0 4px;
+  border-radius: 2px;
+  font-family: inherit;
+  font-weight: 700;
+  font-size: 0.6rem;
+}
+.mag-attach {
+  margin-top: 4px;
+  background: rgba(15, 25, 35, 0.92);
+  border: 1px solid #4ecdc4;
+  border-radius: 4px;
+  padding: 5px 7px;
+  min-width: 130px;
+  max-width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 0.65rem;
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+}
+.mag-attach-label {
+  font-size: 0.55rem;
+  color: #4ecdc4;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  font-weight: 700;
+}
+.mag-attach-value {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #b2f0eb;
+  font-variant-numeric: tabular-nums;
+}
+.mag-attach-label-text {
+  font-size: 0.7rem !important;
+  color: #fff !important;
+}
+.mag-attach-bar {
+  height: 4px;
+  background: #253545;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.mag-attach-bar-fill {
+  height: 100%;
+  background: #4ecdc4;
+  transition: width 0.3s ease;
+}
+.mag-attach-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(78,205,196,0.25);
+  border-top-color: #4ecdc4;
+  border-radius: 50%;
+  animation: mag-spin 0.8s linear infinite;
+}
+@keyframes mag-spin {
+  to { transform: rotate(360deg); }
+}
+.mag-attach-err { color: #e8735a; font-size: 0.65rem; }
+.mag-attach-stages { display: flex; flex-direction: column; gap: 2px; }
+.mag-stage-row {
+  display: grid;
+  grid-template-columns: 28px 1fr 22px;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.55rem;
+}
+.mag-stage-name { color: #9ab; text-transform: uppercase; letter-spacing: 0.3px; }
+.mag-stage-bar { height: 3px; background: #253545; border-radius: 2px; overflow: hidden; }
+.mag-stage-fill { height: 100%; background: #4ecdc4; border-radius: 2px; }
+.mag-stage-pct { color: #fff; text-align: right; font-variant-numeric: tabular-nums; }
+
 .preview-image {
   width: 100%;
   height: 100%;
@@ -630,6 +780,7 @@ html, body, #root {
   border: 2px solid #4ecdc4;
   box-shadow: 0 0 10px rgba(78,205,196,0.35), 0 0 4px rgba(0,0,0,0.5);
   flex-shrink: 0;
+  position: relative;
 }
 .magnifier-sidebar {
   display: flex;

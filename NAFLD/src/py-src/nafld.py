@@ -257,7 +257,13 @@ def _fibrosis_filter_original(window, stain_matrix=None):
     stains = np.dot(-np.log(img_float + np.finfo(float).eps), stain_matrix.T)
     red_stain = stains[:, :, 0]
 
-    tissue_mask = (img_norm.sum(axis=-1) > 50) & (np.mean(img_norm, axis=2) < 220)
+    # Tissue mask MUST be derived from the ORIGINAL image so that
+    # white/near-white background is reliably excluded regardless of
+    # the brightness-normalisation scale factor.  When a slide is
+    # already bright (median > 160) the normalisation scales pixels
+    # DOWN, which used to push 255-white background below the 220
+    # cut-off and incorrectly count it as tissue.
+    tissue_mask = (img_array.sum(axis=-1) > 50) & (np.mean(img_array, axis=2) < 220)
 
     thresh = _find_threshold_by_descent(red_stain, tissue_mask)
 
@@ -472,7 +478,145 @@ def get_delta_map(cache_key):
     return base64.b64encode(buf.getvalue()).decode('utf-8')
 
 
-def classify_from_mask(cache_key, patch_size=256, top_n=5, progress_callback=None):
+def get_excluded_mask(cache_key, max_side=2048):
+    """Return a base64 RGBA PNG that paints excluded (non-tissue) pixels
+    in green and leaves tissue pixels transparent.
+
+    Excluded pixels are exactly the ones removed from the extent
+    denominator (too dark or too light to be tissue), so the overlay
+    matches the percentage calculation pixel-for-pixel.
+    """
+    entry = _deconv_cache.get(cache_key)
+    if entry is None:
+        return None
+    tissue_mask = entry['tissue_mask']
+    h, w = tissue_mask.shape
+
+    # Downsample for fast transmission while staying nearest-neighbour
+    # so the boundary stays crisp.
+    if max(h, w) > max_side:
+        scale = max_side / max(h, w)
+        target_h = max(1, int(h * scale))
+        target_w = max(1, int(w * scale))
+        excluded = (~tissue_mask).astype(np.uint8)
+        excluded = cv2.resize(excluded, (target_w, target_h),
+                              interpolation=cv2.INTER_NEAREST)
+    else:
+        target_h, target_w = h, w
+        excluded = (~tissue_mask).astype(np.uint8)
+
+    img = np.zeros((target_h, target_w, 4), dtype=np.uint8)
+    # Bright green, semi-transparent so the original image shows through.
+    img[excluded > 0] = [76, 217, 100, 140]
+    pil_img = Image.fromarray(img, 'RGBA')
+    buf = BytesIO()
+    pil_img.save(buf, format='PNG')
+    return base64.b64encode(buf.getvalue()).decode('utf-8')
+
+
+def _normalised_region_to_pixels(entry, x1, y1, x2, y2):
+    """Convert (x1,y1,x2,y2) normalised 0-1 coords to integer pixel
+    bounds inside the cached image. Returns None when invalid."""
+    h, w = entry['red_stain'].shape
+    px1 = max(0, int(x1 * w))
+    py1 = max(0, int(y1 * h))
+    px2 = min(w, int(x2 * w))
+    py2 = min(h, int(y2 * h))
+    if px2 <= px1 or py2 <= py1:
+        return None
+    return px1, py1, px2, py2
+
+
+def analyze_area(cache_key, x1, y1, x2, y2):
+    """Compute fibrosis extent for a specific normalised region using the
+    same cached red_stain / tissue_mask / threshold as the global mask.
+
+    Honours any threshold deltas applied by the user. Returns
+    {ratio, fibrosis_pixels, tissue_pixels} or None if no cache.
+    """
+    entry = _deconv_cache.get(cache_key)
+    if entry is None:
+        return None
+    bounds = _normalised_region_to_pixels(entry, x1, y1, x2, y2)
+    if bounds is None:
+        return None
+    px1, py1, px2, py2 = bounds
+
+    red_stain = entry['red_stain'][py1:py2, px1:px2]
+    tissue_mask = entry['tissue_mask'][py1:py2, px1:px2]
+    base_thresh = entry.get('current_threshold', entry.get('auto_threshold', 2.4))
+    td = entry.get('threshold_delta')
+    if td is not None and np.any(td != 0):
+        effective = base_thresh + td[py1:py2, px1:px2]
+    else:
+        effective = base_thresh
+
+    raw = (red_stain > effective) & tissue_mask
+    mask = raw.astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+    fibrosis_pixels = int(np.sum(mask == 255))
+    tissue_pixels = int(np.sum(tissue_mask))
+    ratio = (fibrosis_pixels / tissue_pixels * 100) if tissue_pixels > 0 else 0.0
+    return {
+        'fibrosis_ratio': float(ratio),
+        'fibrosis_pixels': fibrosis_pixels,
+        'tissue_pixels': tissue_pixels,
+    }
+
+
+def classify_area(cache_key, x1, y1, x2, y2):
+    """Run VGG16 + PCA + FCM on a single cropped region of the current
+    fibrosis mask. Fast (single-tile path). Returns membership scores
+    or None when the cache is missing / region is empty / region is
+    almost entirely background.
+    """
+    entry = _deconv_cache.get(cache_key)
+    if entry is None:
+        return None
+    bounds = _normalised_region_to_pixels(entry, x1, y1, x2, y2)
+    if bounds is None:
+        return None
+    px1, py1, px2, py2 = bounds
+
+    # Same exclusion criterion as the global classifier
+    tissue_frac = float(np.mean(entry['tissue_mask'][py1:py2, px1:px2]))
+    if tissue_frac < 0.10:
+        return {'status': 'background', 'tissue_frac': tissue_frac}
+
+    mask_pil, _, _, _ = _recompute_mask(entry)
+    mask_np = np.array(mask_pil)
+    tile = mask_np[py1:py2, px1:px2]
+    if tile.shape[0] < 32 or tile.shape[1] < 32:
+        return {'status': 'too_small'}
+
+    tile_pil = Image.fromarray(tile)
+    try:
+        features = extract_features(tile_pil)
+        reduc_features = pca_model.transform([features])
+        u, _, _, _, _, _ = cmeans_predict(reduc_features.T, centroids,
+                                          m=best_m, error=0.1, maxiter=100)
+        if cluster_map is not None:
+            n_groups = max(cluster_map.values()) + 1
+            u_merged = np.zeros((n_groups, u.shape[1]))
+            for src, dst in cluster_map.items():
+                u_merged[dst] += u[src]
+            u = u_merged
+        label_idx = int(np.argmax(u, axis=0))
+        label_text = cluster_lookup_table.get(label_idx, f"Unknown Cluster {label_idx}")
+        scores = {membership_column_names[i]: float(u[i][0]) for i in range(4)}
+        return {
+            'status': 'success',
+            'cluster_label': label_text,
+            'membership_scores': scores,
+            'tissue_frac': tissue_frac,
+        }
+    finally:
+        del tile_pil
+
+
+def classify_from_mask(cache_key, patch_size=512, top_n=5, progress_callback=None):
     """
     Run VGG16 + PCA + FCM classification on the current refined B&W mask.
 
@@ -504,9 +648,12 @@ def classify_from_mask(cache_key, patch_size=256, top_n=5, progress_callback=Non
     mask_np = np.array(mask_pil)
     h, w = mask_np.shape[:2]
 
-    # Original-image tissue tile grid for the exclusion principle
-    # (recorded during analyze so the exact same tiles are included/excluded)
-    tissue_tile_grid = entry.get('tissue_tile_grid')  # bool array [rows, cols]
+    # Inclusion criterion = same one used by analyze_single_file_patched
+    # and by the extent denominator: the cached tissue_mask (left panel).
+    # No more relying on a separate cached patched grid — we recompute
+    # tile inclusion on the fly from the source of truth.
+    cached_tissue_mask = entry['tissue_mask']
+    TISSUE_FRAC_THRESHOLD = 0.25
 
     # Determine if we should tile (same heuristic as patched analysis)
     is_large = max(h, w) > 2048
@@ -552,25 +699,18 @@ def classify_from_mask(cache_key, patch_size=256, top_n=5, progress_callback=Non
             if th < 32 or tw < 32:
                 continue
 
-            # ── Exclusion: use the same tissue grid from analyze ──
-            # If the grid was recorded during analyze, reuse it exactly so
-            # the same tiles are included/excluded on both images.
-            if tissue_tile_grid is not None:
-                if not tissue_tile_grid[ri, ci]:
-                    if progress_callback:
-                        progress_callback(current_tile, total_tiles, len(patch_memberships),
-                                          grid_rows=num_rows, grid_cols=num_cols,
-                                          tile_row=ri, tile_col=ci, is_tissue=False)
-                    continue
-            else:
-                # Fallback if grid wasn't stored (shouldn't happen for large images)
-                gray = np.mean(tile.astype(np.float32), axis=2) if tile.ndim == 3 else tile.astype(np.float32)
-                if np.sum(gray > 128) / gray.size < 0.01:
-                    if progress_callback:
-                        progress_callback(current_tile, total_tiles, len(patch_memberships),
-                                          grid_rows=num_rows, grid_cols=num_cols,
-                                          tile_row=ri, tile_col=ci, is_tissue=False)
-                    continue
+            # ── Exclusion: same criterion as analyze_single_file_patched.
+            # Compute on-the-fly from the cached tissue_mask (left panel)
+            # rather than relying on a separately cached tile grid.
+            tile_frac = float(np.mean(
+                cached_tissue_mask[py:py + th, px:px + tw]
+            ))
+            if tile_frac < TISSUE_FRAC_THRESHOLD:
+                if progress_callback:
+                    progress_callback(current_tile, total_tiles, len(patch_memberships),
+                                      grid_rows=num_rows, grid_cols=num_cols,
+                                      tile_row=ri, tile_col=ci, is_tissue=False)
+                continue
 
             tile_pil = Image.fromarray(tile)
             try:
@@ -901,7 +1041,7 @@ def _select_slide_level(slide, max_dim=8192):
     return len(slide.level_dimensions) - 1
 
 
-def analyze_single_file_patched(file_path, patch_size=256, max_processing_dim=8192, progress_callback=None):
+def analyze_single_file_patched(file_path, patch_size=512, max_processing_dim=8192, progress_callback=None):
     """
     Patch-based analysis for SVS (and large TIF) files.
 
@@ -997,7 +1137,7 @@ def analyze_single_file_patched(file_path, patch_size=256, max_processing_dim=81
         cache_deconv_data(
             os.path.basename(file_path),
             _stains[:, :, 0],
-            (_img_n.sum(axis=-1) > 50) & (np.mean(_img_n, axis=2) < 220),
+            (full_image.sum(axis=-1) > 50) & (np.mean(full_image, axis=2) < 220),
             full_image.shape,
             auto_threshold=auto_thresh,
         )
@@ -1005,79 +1145,31 @@ def analyze_single_file_patched(file_path, patch_size=256, max_processing_dim=81
 
         print(f"[Patch] Full-image fibrosis filter: {overall_ratio:.2f}%  tissue_px={total_tissue_pixels}")
 
+        # Per-tile work was removed — VGG16/FCM only happens during the
+        # Diagnose step (classify_from_mask). The left-panel scanning grid
+        # served as a visual progress indicator for that dead pass and is
+        # therefore no longer streamed.  patch_count is reported as the
+        # number of tiles that meet the >=25% tissue inclusion criterion.
+        patch_size_count = 512
+        rows = list(range(0, h, patch_size_count))
+        cols = list(range(0, w, patch_size_count))
+        cached_entry = _deconv_cache.get(os.path.basename(file_path))
+        cached_tissue_mask = cached_entry['tissue_mask'] if cached_entry else None
         patch_count = 0
-        patch_memberships = []      # list of membership arrays (4,)
+        if cached_tissue_mask is not None:
+            for py in rows:
+                for px in cols:
+                    ph = min(patch_size_count, h - py)
+                    pw_actual = min(patch_size_count, w - px)
+                    if ph < 32 or pw_actual < 32:
+                        continue
+                    tile_frac = float(np.mean(
+                        cached_tissue_mask[py:py + ph, px:px + pw_actual]
+                    ))
+                    if tile_frac >= 0.25:
+                        patch_count += 1
 
-        # Count total candidate tiles for progress reporting
-        rows = list(range(0, h, patch_size))
-        cols = list(range(0, w, patch_size))
-        num_rows = len(rows)
-        num_cols = len(cols)
-        total_tiles = num_rows * num_cols
-        current_tile = 0
-
-        # Track which tiles pass the background test so classify_from_mask
-        # can use the exact same inclusion/exclusion grid.
-        tissue_tile_grid = np.zeros((num_rows, num_cols), dtype=bool)
-
-        # ── Tile for VGG16 classification — every tile gets classified ──
-        for ri, py in enumerate(rows):
-            for ci, px in enumerate(cols):
-                current_tile += 1
-                patch = full_image[py:py + patch_size, px:px + patch_size]
-                ph, pw_actual = patch.shape[:2]
-
-                if ph < 32 or pw_actual < 32:
-                    continue
-
-                # Skip tiles that are overwhelmingly white (background)
-                gray = np.mean(patch.astype(np.float32), axis=2)
-                if np.sum(gray > 220) / gray.size >= 0.75:
-                    if progress_callback:
-                        progress_callback(current_tile, total_tiles, patch_count,
-                                          grid_rows=num_rows, grid_cols=num_cols,
-                                          tile_row=ri, tile_col=ci, is_tissue=False)
-                    continue
-
-                tissue_tile_grid[ri, ci] = True
-
-                # Extract this tile's mask for VGG16
-                tile_mask = full_mask[py:py + ph, px:px + pw_actual]
-                tile_mask_pil = Image.fromarray(tile_mask)
-                patch_pil = Image.fromarray(patch)
-                try:
-                    patch_u, patch_cl, _ = predict_cluster_pil(
-                        tile_mask_pil, already_filtered=True, original_pil=patch_pil
-                    )
-                    patch_memberships.append([float(patch_u[i][0]) for i in range(4)])
-                except Exception as e:
-                    print(f"[Patch] Classification failed on patch ({py},{px}): {e}")
-                finally:
-                    del tile_mask_pil, patch_pil
-
-                patch_count += 1
-
-                # Free unreferenced tensors periodically
-                if patch_count % 10 == 0:
-                    gc.collect()
-
-                if progress_callback:
-                    progress_callback(current_tile, total_tiles, patch_count,
-                                      grid_rows=num_rows, grid_cols=num_cols,
-                                      tile_row=ri, tile_col=ci, is_tissue=True)
-
-        print(f"[Patch] {patch_count} tissue patches classified — fibrosis {overall_ratio:.2f}%")
-
-        # Store the tissue tile grid so classify_from_mask uses the same tiles
-        _deconv_entry = _deconv_cache.get(os.path.basename(file_path))
-        if _deconv_entry is not None:
-            _deconv_entry['tissue_tile_grid'] = tissue_tile_grid
-
-        # ── Average fuzzy memberships across all patches ──
-        if patch_memberships:
-            avg_memberships = np.mean(patch_memberships, axis=0)
-        else:
-            avg_memberships = np.zeros(4)
+        print(f"[Patch] {patch_count} tissue tiles flagged — fibrosis {overall_ratio:.2f}%")
 
         # ── Resize for frontend display, then free large arrays ──
         display_orig = Image.fromarray(full_image)
@@ -1090,26 +1182,13 @@ def analyze_single_file_patched(file_path, patch_size=256, max_processing_dim=81
         gc.collect()
         print("[GC] Released full_image and full_mask")
 
-        # Derive label from highest average membership
-        final_label = int(np.argmax(avg_memberships))
-        label_text = cluster_lookup_table.get(final_label, f"Unknown Cluster {final_label}")
-        membership_scores = {
-            membership_column_names[i]: float(avg_memberships[i]) for i in range(4)
-        }
-
         return {
             "status": "success",
             "original_image": f"data:image/jpeg;base64,{pil_to_b64(display_orig)}",
             "filtered_image": f"data:image/jpeg;base64,{pil_to_b64(display_mask)}",
             "fibrosis_ratio": float(overall_ratio),
-            "cluster_label": label_text,
-            "membership_scores": membership_scores,
             "threshold": float(auto_thresh),
             "patch_count": patch_count,
-            "None": membership_scores["None"],
-            "Perisinusoidal": membership_scores["Perisinusoidal"],
-            "Bridging": membership_scores["Bridging"],
-            "Cirrosis": membership_scores["Cirrosis"],
         }
     except Exception as e:
         print(f"Error in patched analysis: {e}")
@@ -1192,7 +1271,7 @@ def analyze_single_file(file_path):
         img_f = img_n.astype(np.float32) / 255.0
         stains = np.dot(-np.log(img_f + np.finfo(float).eps), _sm.T)
         cache_deconv_data(cache_key, stains[:, :, 0],
-                         (img_n.sum(axis=-1) > 50) & (np.mean(img_n, axis=2) < 220),
+                         (img_np.sum(axis=-1) > 50) & (np.mean(img_np, axis=2) < 220),
                          img_np.shape, auto_threshold=auto_thresh)
 
         # 3. Run your existing Cluster Prediction

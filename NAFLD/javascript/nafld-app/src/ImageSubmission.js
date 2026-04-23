@@ -1,22 +1,94 @@
 ﻿import { useState, useRef, useCallback, useEffect } from "react";
+import { createPortal } from "react-dom";
 
 const API_BASE = process.env.REACT_APP_API_URL || "http://127.0.0.1:5000";
 
-/** Return an Authorization header object using the stored JWT, or empty object. */
-const authHeader = () => {
-    const token = sessionStorage.getItem("access_token");
-    return token ? { Authorization: `Bearer ${token}` } : {};
+// ── Auth: transparent access-token refresh ──────────────────────────
+// The backend issues short-lived (30 min) access tokens and longer-lived
+// (7 day) refresh tokens. Previously the app would log out on the first
+// 401 after expiry; now we transparently call /refresh and retry.
+
+const _decodeJwt = (token) => {
+    try {
+        const payload = token.split('.')[1];
+        const json = atob(payload.replace(/-/g, '+').replace(/_/g, '/'));
+        return JSON.parse(json);
+    } catch { return null; }
 };
 
-/** If a response is 401, clear session and reload to show login screen. */
-const handleAuthError = (res) => {
+const _msUntilExpiry = (token) => {
+    const p = _decodeJwt(token);
+    if (!p || !p.exp) return 0;
+    return p.exp * 1000 - Date.now();
+};
+
+// In-flight refresh promise so concurrent requests share one /refresh call.
+let _refreshPromise = null;
+
+const refreshAccessToken = () => {
+    if (_refreshPromise) return _refreshPromise;
+    const rt = sessionStorage.getItem("refresh_token");
+    if (!rt) return Promise.resolve(null);
+    _refreshPromise = fetch(`${API_BASE}/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: rt }),
+    })
+        .then(async (r) => {
+            if (!r.ok) return null;
+            const data = await r.json().catch(() => null);
+            if (data && data.access_token) {
+                sessionStorage.setItem("access_token", data.access_token);
+                if (data.username) sessionStorage.setItem("username", data.username);
+                return data.access_token;
+            }
+            return null;
+        })
+        .catch(() => null)
+        .finally(() => { _refreshPromise = null; });
+    return _refreshPromise;
+};
+
+/** Return a usable access token, refreshing first if it expires within minMs. */
+const ensureFreshToken = async (minMs = 60000) => {
+    const t = sessionStorage.getItem("access_token");
+    if (t && _msUntilExpiry(t) > minMs) return t;
+    const refreshed = await refreshAccessToken();
+    return refreshed || t || null;
+};
+
+const _sessionExpired = () => {
+    sessionStorage.removeItem("access_token");
+    sessionStorage.removeItem("refresh_token");
+    sessionStorage.removeItem("username");
+    window.location.reload();
+};
+
+/** Authenticated fetch with one-shot refresh + retry on 401. */
+const apiFetch = async (url, options = {}) => {
+    const doFetch = (token) => {
+        const headers = { ...(options.headers || {}) };
+        if (token) headers.Authorization = `Bearer ${token}`;
+        return fetch(url, { ...options, headers });
+    };
+    let token = await ensureFreshToken();
+    let res = await doFetch(token);
     if (res.status === 401) {
-        sessionStorage.removeItem("access_token");
-        sessionStorage.removeItem("refresh_token");
-        sessionStorage.removeItem("username");
-        window.location.reload();
+        const newToken = await refreshAccessToken();
+        if (!newToken) { _sessionExpired(); throw new Error('Session expired'); }
+        res = await doFetch(newToken);
+        if (res.status === 401) { _sessionExpired(); throw new Error('Session expired'); }
     }
     return res;
+};
+
+/** Build an authenticated SSE URL (refreshing token first if needed). */
+const buildSseUrl = async (path) => {
+    // Ensure plenty of margin (2 min) since SSE streams are long-lived.
+    const token = await ensureFreshToken(120000);
+    if (!token) { _sessionExpired(); throw new Error('Session expired'); }
+    const sep = path.includes('?') ? '&' : '?';
+    return `${API_BASE}${path}${sep}token=${encodeURIComponent(token)}`;
 };
 
 const ImageSubmission = () => {
@@ -30,7 +102,6 @@ const ImageSubmission = () => {
     const [isDragging, setIsDragging] = useState(false);
     const [uploadProgress, setUploadProgress] = useState(0);
     const [patchProgress, setPatchProgress] = useState(null); // { current, total, tissue_patches }
-    const [tileGrid, setTileGrid] = useState(null); // { rows, cols, tiles: [0=pending|1=bg|2=tissue] }
     const fileInputRef = useRef(null);
     const originalImgRef = useRef(null);
     const filteredImgRef = useRef(null);
@@ -68,6 +139,26 @@ const ImageSubmission = () => {
     const [maskChangedSinceClassify, setMaskChangedSinceClassify] = useState(false);
     const [filteredImgContentRect, setFilteredImgContentRect] = useState(null);
     const classifyGridInfo = useRef(null); // { rows, cols } from classification
+
+    // Excluded-pixels overlay (shows what is removed from the extent denominator)
+    const [showExcluded, setShowExcluded] = useState(false);
+    const [excludedOverlay, setExcludedOverlay] = useState(null);
+    const [isLoadingExcluded, setIsLoadingExcluded] = useState(false);
+
+    // Area inspection (Q key while magnifier active): kicks off a fast
+    // extent + classify on the region under the lens. Auto-cancels
+    // when the cursor leaves the locked region.
+    const [areaExtent, setAreaExtent] = useState(null);     // { state, ratio }
+    const [areaClassify, setAreaClassify] = useState(null); // { state, scores, label }
+    const areaInspectRef = useRef({ region: null, abort: null });
+
+    const cancelAreaInspect = useCallback(() => {
+        const cur = areaInspectRef.current;
+        if (cur.abort) { try { cur.abort.abort(); } catch (e) {} }
+        areaInspectRef.current = { region: null, abort: null };
+        setAreaExtent(null);
+        setAreaClassify(null);
+    }, []);
 
     const displayedResult = analysisResult || previewResult;
 
@@ -149,9 +240,8 @@ const ImageSubmission = () => {
             if (!uploadedFilename) return;
             setIsRethresholding(true);
             try {
-                const res = await fetch(
-                    `${API_BASE}/rethreshold/${encodeURIComponent(uploadedFilename)}?threshold=${value}`,
-                    { headers: authHeader() }
+                const res = await apiFetch(
+                    `${API_BASE}/rethreshold/${encodeURIComponent(uploadedFilename)}?threshold=${value}`
                 );
                 if (res.ok) {
                     const data = await res.json();
@@ -195,9 +285,26 @@ const ImageSubmission = () => {
         }
         const x = (e.clientX - rect.left) / rect.width;
         const y = (e.clientY - rect.top) / rect.height;
-        setMagnifier({ x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) });
-    }, []);
-    const handlePanelMouseLeave = useCallback(() => setMagnifier(null), []);
+        const newPos = { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
+        // While an area inspection is locked, freeze the lens at the pinned
+        // position. Only cancel (and resume tracking) once the cursor
+        // wanders well outside the lens footprint.
+        const inspect = areaInspectRef.current;
+        if (inspect.region) {
+            const dx = Math.abs(newPos.x - inspect.region.cx);
+            const dy = Math.abs(newPos.y - inspect.region.cy);
+            if (dx > 0.08 || dy > 0.08) {
+                cancelAreaInspect();
+                setMagnifier(newPos);
+            }
+            return;
+        }
+        setMagnifier(newPos);
+    }, [cancelAreaInspect]);
+    const handlePanelMouseLeave = useCallback(() => {
+        cancelAreaInspect();
+        setMagnifier(null);
+    }, [cancelAreaInspect]);
 
     // Compute the normalised region visible in the magnifier
     const MAGNIFIER_SIZE = 160;
@@ -246,9 +353,8 @@ const ImageSubmission = () => {
                     x1: region.x1, y1: region.y1,
                     x2: region.x2, y2: region.y2,
                 });
-                const res = await fetch(
-                    `${API_BASE}/rethreshold-area/${encodeURIComponent(uploadedFilename)}?${params}`,
-                    { headers: authHeader() }
+                const res = await apiFetch(
+                    `${API_BASE}/rethreshold-area/${encodeURIComponent(uploadedFilename)}?${params}`
                 );
                 if (res.ok) {
                     const data = await res.json();
@@ -294,9 +400,8 @@ const ImageSubmission = () => {
                 x1: region.x1, y1: region.y1,
                 x2: region.x2, y2: region.y2,
             });
-            const res = await fetch(
-                `${API_BASE}/reset-area/${encodeURIComponent(uploadedFilename)}?${params}`,
-                { headers: authHeader() }
+            const res = await apiFetch(
+                `${API_BASE}/reset-area/${encodeURIComponent(uploadedFilename)}?${params}`
             );
             if (res.ok) {
                 const data = await res.json();
@@ -319,9 +424,8 @@ const ImageSubmission = () => {
         if (!uploadedFilename) return;
         setIsRethresholding(true);
         try {
-            const res = await fetch(
-                `${API_BASE}/undo-area/${encodeURIComponent(uploadedFilename)}`,
-                { headers: authHeader() }
+            const res = await apiFetch(
+                `${API_BASE}/undo-area/${encodeURIComponent(uploadedFilename)}`
             );
             if (res.ok) {
                 const data = await res.json();
@@ -362,34 +466,37 @@ const ImageSubmission = () => {
             try {
                 const result = await new Promise((resolve, reject) => {
                     let settled = false;
-                    const evtSource = new EventSource(
-                        `${API_BASE}/classify-mask/${encodeURIComponent(uploadedFilename)}?token=${encodeURIComponent(sessionStorage.getItem('access_token') || '')}`
-                    );
-                    evtSource.onmessage = (event) => {
-                        try {
-                            const msg = JSON.parse(event.data);
-                            if (msg.type === 'progress') {
-                                setClassifyProgress({ current: msg.current, total: msg.total, tissue_patches: msg.tissue_patches });
-                                if (msg.grid_rows !== undefined) {
-                                    setClassifyTileGrid(prev => {
-                                        const r = msg.grid_rows, c = msg.grid_cols;
-                                        const tiles = prev && prev.tiles.length === r * c ? [...prev.tiles] : new Array(r * c).fill(0);
-                                        tiles[msg.tile_row * c + msg.tile_col] = msg.is_tissue ? 2 : 1;
-                                        return { rows: r, cols: c, tiles };
-                                    });
+                    let evtSource = null;
+                    buildSseUrl(`/classify-mask/${encodeURIComponent(uploadedFilename)}`)
+                        .then((url) => {
+                            evtSource = new EventSource(url);
+                            evtSource.onmessage = (event) => {
+                                try {
+                                    const msg = JSON.parse(event.data);
+                                    if (msg.type === 'progress') {
+                                        setClassifyProgress({ current: msg.current, total: msg.total, tissue_patches: msg.tissue_patches });
+                                        if (msg.grid_rows !== undefined) {
+                                            setClassifyTileGrid(prev => {
+                                                const r = msg.grid_rows, c = msg.grid_cols;
+                                                const tiles = prev && prev.tiles.length === r * c ? [...prev.tiles] : new Array(r * c).fill(0);
+                                                tiles[msg.tile_row * c + msg.tile_col] = msg.is_tissue ? 2 : 1;
+                                                return { rows: r, cols: c, tiles };
+                                            });
+                                        }
+                                    } else if (msg.type === 'result') {
+                                        settled = true;
+                                        evtSource.close();
+                                        resolve(msg.data);
+                                    }
+                                } catch (e) {
+                                    if (!settled) { settled = true; evtSource.close(); reject(e); }
                                 }
-                            } else if (msg.type === 'result') {
-                                settled = true;
-                                evtSource.close();
-                                resolve(msg.data);
-                            }
-                        } catch (e) {
-                            if (!settled) { settled = true; evtSource.close(); reject(e); }
-                        }
-                    };
-                    evtSource.onerror = () => {
-                        if (!settled) { settled = true; evtSource.close(); reject(new Error('Connection lost')); }
-                    };
+                            };
+                            evtSource.onerror = () => {
+                                if (!settled) { settled = true; evtSource.close(); reject(new Error('Connection lost')); }
+                            };
+                        })
+                        .catch((e) => { if (!settled) { settled = true; reject(e); } });
                 });
                 setClassificationResult(result);
                 if (result && result.worst_patches) {
@@ -397,7 +504,7 @@ const ImageSubmission = () => {
                     classifyGridInfo.current = {
                         rows: result.grid_rows, cols: result.grid_cols,
                         imgH: result.img_h, imgW: result.img_w,
-                        patchSize: result.patch_size || 256,
+                        patchSize: result.patch_size || 512,
                     };
                 }
                 setMaskChangedSinceClassify(false);
@@ -417,6 +524,98 @@ const ImageSubmission = () => {
         setClassifyProgress(null);
     }, [uploadedFilename]);
 
+    // Toggle the green "excluded pixels" overlay on the original image.
+    // The overlay paints exactly the pixels that were dropped from the
+    // extent denominator (too dark or too white to be tissue).
+    const handleToggleExcluded = useCallback(async () => {
+        if (!uploadedFilename) return;
+        if (showExcluded) {
+            setShowExcluded(false);
+            return;
+        }
+        if (excludedOverlay) {
+            setShowExcluded(true);
+            return;
+        }
+        setIsLoadingExcluded(true);
+        try {
+            const res = await apiFetch(`${API_BASE}/excluded-mask/${encodeURIComponent(uploadedFilename)}`);
+            if (res.ok) {
+                const data = await res.json();
+                setExcludedOverlay(data.overlay);
+                setShowExcluded(true);
+            }
+        } catch (e) {
+            console.error('Excluded-mask fetch error:', e);
+        } finally {
+            setIsLoadingExcluded(false);
+        }
+    }, [uploadedFilename, showExcluded, excludedOverlay]);
+
+    // Press Q with magnifier active to run a fast extent + classify on the
+    // area under the lens. Both calls share an AbortController so a mouse
+    // move (handled in handlePanelMouseMove) cancels them in flight.
+    const handleAreaInspect = useCallback(() => {
+        if (!uploadedFilename || !magnifier) return;
+        const region = getMagnifierRegion();
+        if (!region) return;
+        // Re-entry: cancel any in-flight inspection first
+        const prev = areaInspectRef.current;
+        if (prev.abort) { try { prev.abort.abort(); } catch (e) {} }
+
+        const ctrl = new AbortController();
+        areaInspectRef.current = {
+            region: {
+                ...region,
+                cx: (region.x1 + region.x2) / 2,
+                cy: (region.y1 + region.y2) / 2,
+            },
+            abort: ctrl,
+        };
+        setAreaExtent({ state: 'loading' });
+        setAreaClassify({ state: 'loading' });
+
+        const params = new URLSearchParams({
+            x1: region.x1, y1: region.y1, x2: region.x2, y2: region.y2,
+        });
+
+        // Extent — fast, runs against cached red_stain.
+        apiFetch(`${API_BASE}/analyze-area/${encodeURIComponent(uploadedFilename)}?${params}`,
+            { signal: ctrl.signal })
+            .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+            .then(data => {
+                if (areaInspectRef.current.abort !== ctrl) return; // stale
+                setAreaExtent({ state: 'done', ratio: data.fibrosis_ratio });
+            })
+            .catch(e => {
+                if (e.name === 'AbortError') return;
+                if (areaInspectRef.current.abort !== ctrl) return;
+                setAreaExtent({ state: 'error' });
+            });
+
+        // Classify — VGG16 + PCA + FCM on the cropped mask region.
+        apiFetch(`${API_BASE}/classify-area/${encodeURIComponent(uploadedFilename)}?${params}`,
+            { signal: ctrl.signal })
+            .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+            .then(data => {
+                if (areaInspectRef.current.abort !== ctrl) return;
+                if (data.status === 'success') {
+                    setAreaClassify({
+                        state: 'done',
+                        scores: data.membership_scores,
+                        label: data.cluster_label,
+                    });
+                } else {
+                    setAreaClassify({ state: 'background' });
+                }
+            })
+            .catch(e => {
+                if (e.name === 'AbortError') return;
+                if (areaInspectRef.current.abort !== ctrl) return;
+                setAreaClassify({ state: 'error' });
+            });
+    }, [uploadedFilename, magnifier, getMagnifierRegion]);
+
     // Key handler: Ctrl+Z = undo (anytime), Ctrl+R = reset area (magnifier active),
     // arrows = zoom & area delta (magnifier active), Escape = close overlays
     useEffect(() => {
@@ -434,6 +633,12 @@ const ImageSubmission = () => {
             }
             // Everything below requires active magnifier
             if (!magnifier) return;
+            // Q: instant area inspection (extent + classify) of region under lens
+            if (e.key === 'q' || e.key === 'Q') {
+                e.preventDefault();
+                handleAreaInspect();
+                return;
+            }
             // Ctrl+R: reset area under observation
             if (e.ctrlKey && e.key === 'r') {
                 e.preventDefault();
@@ -468,7 +673,7 @@ const ImageSubmission = () => {
         };
         window.addEventListener('keydown', handler, true);
         return () => window.removeEventListener('keydown', handler, true);
-    }, [magnifier, autoThreshold, getMagnifierRegion, handleLocalDeltaChange, handleResetArea, handleUndoArea, showHelp, showResetConfirm, handleConfirmNo]);
+    }, [magnifier, autoThreshold, getMagnifierRegion, handleLocalDeltaChange, handleResetArea, handleUndoArea, showHelp, showResetConfirm, handleConfirmNo, handleAreaInspect]);
 
     const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB per chunk
     const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024; // 10 MB -- use chunking above this
@@ -489,7 +694,7 @@ const ImageSubmission = () => {
             form.append('resumableChunkNumber', String(i + 1));
             form.append('resumableTotalChunks', String(totalChunks));
 
-            const res = await fetch(`${API_BASE}/largefile`, { method: 'POST', headers: authHeader(), body: form }).then(handleAuthError);
+            const res = await apiFetch(`${API_BASE}/largefile`, { method: 'POST', body: form });
             if (!res.ok) throw new Error(`Chunk ${i + 1}/${totalChunks} failed: ${await res.text()}`);
 
             const data = await res.json();
@@ -507,7 +712,7 @@ const ImageSubmission = () => {
     const uploadSimple = async (file) => {
         const formData = new FormData();
         formData.append('file', file);
-        const res = await fetch(`${API_BASE}/upload`, { method: 'POST', headers: authHeader(), body: formData }).then(handleAuthError);
+        const res = await apiFetch(`${API_BASE}/upload`, { method: 'POST', body: formData });
         if (!res.ok) throw new Error(`Upload failed: ${await res.text()}`);
         const data = await res.json();
         if (!data.filename) throw new Error('Upload succeeded but no filename returned.');
@@ -541,7 +746,6 @@ const ImageSubmission = () => {
         classifyGridInfo.current = null;
         setUploadedFilename("");
         setUploadProgress(0);
-        setTileGrid(null);
         setAutoThreshold(null);
         setUserThreshold(null);
         setAdjustedRatio(null);
@@ -550,6 +754,8 @@ const ImageSubmission = () => {
         setHasLocalEdits(false);
         setShowResetConfirm(false);
         setDeltaMap(null);
+        setShowExcluded(false);
+        setExcludedOverlay(null);
 
         try {
             setIsUploading(true);
@@ -565,7 +771,7 @@ const ImageSubmission = () => {
 
             if (isSvsTif) {
                 // Large slides: fetch a quick preview so the user sees something while patches process
-                const previewResponse = await fetch(`${API_BASE}/preview/${encodeURIComponent(filename)}`, { headers: authHeader() });
+                const previewResponse = await apiFetch(`${API_BASE}/preview/${encodeURIComponent(filename)}`);
                 if (previewResponse.ok) {
                     setPreviewResult(await previewResponse.json());
                 }
@@ -576,41 +782,38 @@ const ImageSubmission = () => {
                 setPatchProgress(null);
 
                 const analyzeResult = await new Promise((resolve, reject) => {
-                    const evtSource = new EventSource(`${API_BASE}/analyze-stream/${encodeURIComponent(filename)}?token=${encodeURIComponent(sessionStorage.getItem('access_token') || '')}`);
-                    evtSource.onmessage = (event) => {
-                        try {
-                            const msg = JSON.parse(event.data);
-                            if (msg.type === 'progress') {
-                                // If the backend sent an analysis-level preview, swap to it
-                                // so the tile overlay aligns with the actual image being tiled.
-                                if (msg.analysis_preview) {
-                                    setPreviewResult(prev => ({
-                                        ...prev,
-                                        original_image: msg.analysis_preview,
-                                    }));
+                    let settled = false;
+                    let evtSource = null;
+                    buildSseUrl(`/analyze-stream/${encodeURIComponent(filename)}`)
+                        .then((url) => {
+                            evtSource = new EventSource(url);
+                            evtSource.onmessage = (event) => {
+                                try {
+                                    const msg = JSON.parse(event.data);
+                                    if (msg.type === 'progress') {
+                                        // If the backend sent an analysis-level preview, swap to it
+                                        // so the tile overlay aligns with the actual image being tiled.
+                                        if (msg.analysis_preview) {
+                                            setPreviewResult(prev => ({
+                                                ...prev,
+                                                original_image: msg.analysis_preview,
+                                            }));
+                                        }
+                                        setPatchProgress({ current: msg.current, total: msg.total, tissue_patches: msg.tissue_patches });
+                                    } else if (msg.type === 'result') {
+                                        settled = true;
+                                        evtSource.close();
+                                        resolve(msg.data);
+                                    }
+                                } catch (e) {
+                                    if (!settled) { settled = true; evtSource.close(); reject(e); }
                                 }
-                                setPatchProgress({ current: msg.current, total: msg.total, tissue_patches: msg.tissue_patches });
-                                if (msg.grid_rows !== undefined) {
-                                    setTileGrid(prev => {
-                                        const r = msg.grid_rows, c = msg.grid_cols;
-                                        const tiles = prev && prev.tiles.length === r * c ? [...prev.tiles] : new Array(r * c).fill(0);
-                                        tiles[msg.tile_row * c + msg.tile_col] = msg.is_tissue ? 2 : 1;
-                                        return { rows: r, cols: c, tiles };
-                                    });
-                                }
-                            } else if (msg.type === 'result') {
-                                evtSource.close();
-                                resolve(msg.data);
-                            }
-                        } catch (e) {
-                            evtSource.close();
-                            reject(e);
-                        }
-                    };
-                    evtSource.onerror = () => {
-                        evtSource.close();
-                        reject(new Error('Analysis stream connection lost'));
-                    };
+                            };
+                            evtSource.onerror = () => {
+                                if (!settled) { settled = true; evtSource.close(); reject(new Error('Analysis stream connection lost')); }
+                            };
+                        })
+                        .catch((e) => { if (!settled) { settled = true; reject(e); } });
                 });
                 setAnalysisResult(analyzeResult);
             } else {
@@ -619,7 +822,7 @@ const ImageSubmission = () => {
                 setIsAnalyzing(true);
                 setPatchProgress(null);
 
-                const analyzeResponse = await fetch(`${API_BASE}/analyze/${encodeURIComponent(filename)}`, { headers: authHeader() });
+                const analyzeResponse = await apiFetch(`${API_BASE}/analyze/${encodeURIComponent(filename)}`);
                 if (!analyzeResponse.ok) throw new Error(`Analyze failed: ${await analyzeResponse.text()}`);
                 const result = await analyzeResponse.json();
                 setPreviewResult(result);    // Images appear via displayedResult
@@ -632,7 +835,6 @@ const ImageSubmission = () => {
             setIsUploading(false);
             setIsAnalyzing(false);
             setPatchProgress(null);
-            setTileGrid(null);
         }
     }, []);
 
@@ -808,12 +1010,13 @@ const ImageSubmission = () => {
     // The mask to display: use adjusted mask if user moved slider, else the original
     const displayedMaskSrc = adjustedMask || displayedResult?.filtered_image;
 
-    // Should we show the tile overlay on the original image?
-    const showTileOverlay = tileGrid && isAnalyzing;
+    // (Tile overlay during analyze removed — the analyze pass no longer
+    // does per-tile work, so there's nothing to visualise. The classify
+    // step still shows its tile scan on the right panel.)
 
     // Magnifier rendering helper
     const zoomFraction = (magnifierZoom - MIN_ZOOM) / (MAX_ZOOM - MIN_ZOOM);
-    const renderMagnifier = (imgRef) => {
+    const renderMagnifier = (imgRef, side = 'left') => {
         if (!magnifier || !imgRef.current) return null;
         const img = imgRef.current;
         const container = img.parentElement;
@@ -837,10 +1040,66 @@ const ImageSubmission = () => {
         const bgH = nh * effectiveZoom * scale;
         const bgX = -(imgX * bgW - MAGNIFIER_SIZE / 2);
         const bgY = -(imgY * bgH - MAGNIFIER_SIZE / 2);
-        return (
+
+        // Convert panel-local coords to viewport coords so we can portal
+        // the magnifier out of any clipping ancestors (e.g. .img-panel
+        // overflow:hidden) and have it float over the rest of the UI.
+        const panelRect = container.getBoundingClientRect();
+        const vpLeft = panelRect.left + posX - MAGNIFIER_SIZE / 2;
+        const vpTop = panelRect.top + posY - MAGNIFIER_SIZE / 2;
+
+        // Inspection attachment for this magnifier
+        let attachment = null;
+        if (side === 'left' && areaExtent) {
+            attachment = (
+                <div className="mag-attach mag-attach-extent">
+                    <span className="mag-attach-label">Area Extent</span>
+                    {areaExtent.state === 'loading' && <span className="mag-attach-spinner" />}
+                    {areaExtent.state === 'done' && (
+                        <>
+                            <span className="mag-attach-value">{areaExtent.ratio.toFixed(2)}%</span>
+                            <div className="mag-attach-bar">
+                                <div className="mag-attach-bar-fill" style={{ width: `${Math.min(areaExtent.ratio, 100)}%` }} />
+                            </div>
+                        </>
+                    )}
+                    {areaExtent.state === 'error' && <span className="mag-attach-err">err</span>}
+                </div>
+            );
+        } else if (side === 'right' && areaClassify) {
+            attachment = (
+                <div className="mag-attach mag-attach-classify">
+                    <span className="mag-attach-label">Area Stage</span>
+                    {areaClassify.state === 'loading' && <span className="mag-attach-spinner" />}
+                    {areaClassify.state === 'done' && areaClassify.scores && (
+                        <>
+                            <span className="mag-attach-value mag-attach-label-text">{areaClassify.label}</span>
+                            <div className="mag-attach-stages">
+                                {Object.entries(areaClassify.scores).map(([k, v]) => (
+                                    <div key={k} className="mag-stage-row">
+                                        <span className="mag-stage-name">{k.slice(0, 4)}</span>
+                                        <div className="mag-stage-bar"><div className="mag-stage-fill" style={{ width: `${v * 100}%` }} /></div>
+                                        <span className="mag-stage-pct">{Math.round(v * 100)}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </>
+                    )}
+                    {areaClassify.state === 'background' && <span className="mag-attach-err">background</span>}
+                    {areaClassify.state === 'error' && <span className="mag-attach-err">err</span>}
+                </div>
+            );
+        }
+
+        // "Press Q" hint only when no inspection is active
+        const showQHint = !areaExtent && !areaClassify && analysisResult;
+
+        return createPortal((
             <div className="magnifier-group" style={{
-                left: posX - MAGNIFIER_SIZE / 2,
-                top: posY - MAGNIFIER_SIZE / 2,
+                position: 'fixed',
+                left: vpLeft,
+                top: vpTop,
+                zIndex: 9999,
             }}>
                 <div className="mag-main-col">
                     <div className="mag-top-row">
@@ -850,7 +1109,9 @@ const ImageSubmission = () => {
                             backgroundImage: `url(${img.src})`,
                             backgroundSize: `${bgW}px ${bgH}px`,
                             backgroundPosition: `${bgX}px ${bgY}px`,
-                        }} />
+                        }}>
+                            {showQHint && <span className="mag-q-hint"><kbd>Q</kbd> inspect</span>}
+                        </div>
                         {/* Right sidebar: zoom */}
                         <div className="magnifier-sidebar">
                             <span className="mag-sidebar-label">Zoom</span>
@@ -872,9 +1133,10 @@ const ImageSubmission = () => {
                         <span className="mag-arrow-hint">▶</span>
                         <span className="mag-bottom-label">Area Adj.</span>
                     </div>
+                    {attachment}
                 </div>
             </div>
-        );
+        ), document.body);
     };
 
     return (
@@ -922,33 +1184,50 @@ const ImageSubmission = () => {
                         )}
 
                 {/* Magnifier overlay */}
-                        {magnifier && displayedResult?.original_image && renderMagnifier(originalImgRef)}
+                        {magnifier && displayedResult?.original_image && renderMagnifier(originalImgRef, 'left')}
                         {magnifier && displayedResult?.original_image && <div className="magnifier-dim" />}
 
                         {/* Filename & change message at bottom of frame */}
                         {image && (
                             <div className="img-panel-footer">
                                 <span className="img-panel-filename">{image.name}</span>
-                                {!isBusy && <span className="img-panel-change" onClick={handleClick}>Click or drop to change</span>}
-                                {isAnalyzing && <button className="cancel-diagnosis-btn" onClick={() => window.location.reload()}>× Cancel Diagnosis</button>}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                    {!isBusy && <span className="img-panel-change" onClick={handleClick}>Click or drop to change</span>}
+                                    {displayedResult?.original_image && uploadedFilename && !isBusy && (
+                                        <button
+                                            className={`excluded-toggle-btn${showExcluded ? ' active' : ''}`}
+                                            onClick={(e) => { e.stopPropagation(); handleToggleExcluded(); }}
+                                            title={showExcluded ? 'Hide excluded pixels' : 'Highlight pixels excluded from extent %'}
+                                            disabled={isLoadingExcluded}
+                                        >
+                                            {isLoadingExcluded ? '…' : showExcluded ? '● Excluded' : '○ Excluded'}
+                                        </button>
+                                    )}
+                                    {isAnalyzing && <button className="cancel-diagnosis-btn" onClick={() => window.location.reload()}>× Cancel Diagnosis</button>}
+                                </div>
                             </div>
                         )}
 
-                        {/* Tile grid overlay — positioned over the actual image content only */}
-                        {showTileOverlay && imgContentRect && (
-                            <div className="tile-overlay" style={{
-                                left: imgContentRect.left,
-                                top: imgContentRect.top,
-                                width: imgContentRect.width,
-                                height: imgContentRect.height,
-                                gridTemplateColumns: `repeat(${tileGrid.cols}, 1fr)`,
-                                gridTemplateRows: `repeat(${tileGrid.rows}, 1fr)`,
-                            }}>
-                                {tileGrid.tiles.map((s, i) => (
-                                    <div key={i} className={`tile-cell ${s === 2 ? 'tile-tissue' : s === 1 ? 'tile-bg' : 'tile-pending'}`} />
-                                ))}
-                            </div>
+                        {/* Tile grid overlay removed — analyze no longer scans tile-by-tile. */}
+
+                        {/* Excluded-pixels overlay (green = not counted in extent denominator) */}
+                        {showExcluded && excludedOverlay && imgContentRect && (
+                            <img
+                                alt="Excluded pixels"
+                                src={excludedOverlay}
+                                draggable="false"
+                                style={{
+                                    position: 'absolute',
+                                    left: imgContentRect.left,
+                                    top: imgContentRect.top,
+                                    width: imgContentRect.width,
+                                    height: imgContentRect.height,
+                                    pointerEvents: 'none',
+                                    imageRendering: 'pixelated',
+                                }}
+                            />
                         )}
+
 
                         {/* Green progress bar at bottom of upload image */}
                         {(isUploading || isAnalyzing) && (
@@ -988,7 +1267,7 @@ const ImageSubmission = () => {
                         ) : (
                             <div className="placeholder-text">Fibrosis mask appears after analysis</div>
                         )}
-                        {magnifier && displayedMaskSrc && renderMagnifier(filteredImgRef)}
+                        {magnifier && displayedMaskSrc && renderMagnifier(filteredImgRef, 'right')}
                         {magnifier && displayedMaskSrc && <div className="magnifier-dim" />}
                         {displayedMaskSrc && (
                             <button className="download-mask-btn" onClick={handleDownloadMask} title="Download fibrosis mask">
@@ -1120,22 +1399,17 @@ const ImageSubmission = () => {
                     </button>
                 </div>
 
-                {/* Patch progress card — only visible during SVS/TIF analysis */}
-                {patchProgress && isAnalyzing && (
+                {/* Extent calculation in progress — animated indeterminate indicator */}
+                {isAnalyzing && (
                     <div className="report-card" style={{ borderColor: '#4ecdc4' }}>
-                        <p className="report-label" style={{ color: '#4ecdc4', fontWeight: 600 }}>Patch Analysis in Progress</p>
-                        <div className="extent-bar-track" style={{ height: '6px', marginBottom: '0.5rem' }}>
-                            <div
-                                className="extent-bar-fill"
-                                style={{ width: `${Math.round((patchProgress.current / patchProgress.total) * 100)}%` }}
-                            />
+                        <p className="report-label" style={{ color: '#4ecdc4', fontWeight: 600 }}>
+                            Extent Calculation in Progress<span className="extent-dots" />
+                        </p>
+                        <div className="extent-scan-track">
+                            <div className="extent-scan-fill" />
                         </div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', color: '#fff' }}>
-                            <span>Tile {patchProgress.current} / {patchProgress.total}</span>
-                            <span>{patchProgress.tissue_patches} tissue patches found</span>
-                        </div>
-                        <p style={{ fontSize: '0.72rem', color: '#fff', marginTop: '0.3rem' }}>
-                            Processing 256×256 patches, skipping blank areas…
+                        <p style={{ fontSize: '0.72rem', color: '#fff', marginTop: '0.3rem', marginBottom: 0 }}>
+                            Deconvolving PSR stain · sweeping adaptive threshold · isolating collagen pixels<span className="extent-dots" />
                         </p>
                     </div>
                 )}
@@ -1197,7 +1471,7 @@ const ImageSubmission = () => {
                                         setDeltaMap(null);
                                         setMaskChangedSinceClassify(true);
                                         setShowWorstPatches(false);
-                                        fetch(`${API_BASE}/rethreshold/${encodeURIComponent(uploadedFilename)}?threshold=${autoThreshold}`, { headers: authHeader() })
+                                        apiFetch(`${API_BASE}/rethreshold/${encodeURIComponent(uploadedFilename)}?threshold=${autoThreshold}`)
                                             .catch(() => {});
                                     };
                                     if (hasLocalEdits) {
@@ -1326,6 +1600,7 @@ const ImageSubmission = () => {
                             <ul className="help-bindings">
                                 <li><kbd>&#9650;</kbd> <kbd>&#9660;</kbd> Zoom in / out</li>
                                 <li><kbd>&#9664;</kbd> <kbd>&#9654;</kbd> Decrease / increase area threshold</li>
+                                <li><kbd>Q</kbd> Inspect area and instantly compute extent (left lens) and stage classification (right lens) for the region under the magnifier. Auto-cancels when the cursor moves.</li>
                                 <li><kbd>Ctrl+R</kbd> Reset observed area to original threshold</li>
                                 <li><kbd>Ctrl+Z</kbd> Undo all increments made to the last modified area</li>
                                 <li><kbd>Esc</kbd> Close overlays</li>

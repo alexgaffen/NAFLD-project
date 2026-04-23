@@ -12,7 +12,7 @@ import zipfile
 import io
 import csv
 from werkzeug.utils import secure_filename
-from nafld import analyze_single_file, preview_single_file, analyze_single_file_patched, rethreshold, rethreshold_area, reset_area, undo_area, get_delta_map, pil_to_b64, classify_from_mask
+from nafld import analyze_single_file, preview_single_file, analyze_single_file_patched, rethreshold, rethreshold_area, reset_area, undo_area, get_delta_map, get_excluded_mask, pil_to_b64, classify_from_mask, analyze_area, classify_area
 
 # sys.path.append("C:\\Projects\\Machine Learning\\NAFLD\\NAFLD-project\\NAFLD\\src\\py-src\\nafld.py")
 from nafld import process_all_images
@@ -280,6 +280,58 @@ def undo_area_file(filename):
         'delta_map': f"data:image/png;base64,{delta_map_b64}" if delta_map_b64 else None,
         'has_local_edits': has_edits,
     }), 200
+
+
+@app.route("/excluded-mask/<filename>", methods=['GET'])
+@login_required
+def excluded_mask_file(filename):
+    """Return a base64 RGBA PNG that paints excluded (non-tissue) pixels
+    in green. These are the exact pixels removed from the extent denominator."""
+    overlay_b64 = get_excluded_mask(filename)
+    if overlay_b64 is None:
+        return jsonify({'error': 'No cached data for this file. Re-run analysis first.'}), 404
+    return jsonify({
+        'status': 'success',
+        'overlay': f"data:image/png;base64,{overlay_b64}",
+    }), 200
+
+
+def _parse_region_args():
+    """Parse normalised x1,y1,x2,y2 query params. Returns tuple or None on error."""
+    try:
+        return (float(request.args.get('x1', '')),
+                float(request.args.get('y1', '')),
+                float(request.args.get('x2', '')),
+                float(request.args.get('y2', '')))
+    except (ValueError, TypeError):
+        return None
+
+
+@app.route("/analyze-area/<filename>", methods=['GET'])
+@login_required
+def analyze_area_file(filename):
+    """Return fibrosis extent for a normalised region under the magnifier."""
+    region = _parse_region_args()
+    if region is None:
+        return jsonify({'error': 'Missing or invalid x1/y1/x2/y2'}), 400
+    result = analyze_area(filename, *region)
+    if result is None:
+        return jsonify({'error': 'No cached data or invalid region'}), 404
+    result['status'] = 'success'
+    return jsonify(result), 200
+
+
+@app.route("/classify-area/<filename>", methods=['GET'])
+@login_required
+def classify_area_file(filename):
+    """Run VGG16+PCA+FCM on the magnifier region's mask. Returns membership scores."""
+    region = _parse_region_args()
+    if region is None:
+        return jsonify({'error': 'Missing or invalid x1/y1/x2/y2'}), 400
+    result = classify_area(filename, *region)
+    if result is None:
+        return jsonify({'error': 'No cached data or invalid region'}), 404
+    return jsonify(result), 200
 
 
 @app.route("/classify-mask/<filename>", methods=['GET'])
