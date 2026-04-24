@@ -150,12 +150,12 @@ const ImageSubmission = () => {
     // when the cursor leaves the locked region.
     const [areaExtent, setAreaExtent] = useState(null);     // { state, ratio }
     const [areaClassify, setAreaClassify] = useState(null); // { state, scores, label }
-    const areaInspectRef = useRef({ region: null, abort: null });
+    const areaInspectRef = useRef({ region: null, abort: null, panelPos: null });
 
     const cancelAreaInspect = useCallback(() => {
         const cur = areaInspectRef.current;
         if (cur.abort) { try { cur.abort.abort(); } catch (e) {} }
-        areaInspectRef.current = { region: null, abort: null };
+        areaInspectRef.current = { region: null, abort: null, panelPos: null };
         setAreaExtent(null);
         setAreaClassify(null);
     }, []);
@@ -290,9 +290,9 @@ const ImageSubmission = () => {
         // position. Only cancel (and resume tracking) once the cursor
         // wanders well outside the lens footprint.
         const inspect = areaInspectRef.current;
-        if (inspect.region) {
-            const dx = Math.abs(newPos.x - inspect.region.cx);
-            const dy = Math.abs(newPos.y - inspect.region.cy);
+        if (inspect.panelPos) {
+            const dx = Math.abs(newPos.x - inspect.panelPos.x);
+            const dy = Math.abs(newPos.y - inspect.panelPos.y);
             if (dx > 0.08 || dy > 0.08) {
                 cancelAreaInspect();
                 setMagnifier(newPos);
@@ -565,11 +565,8 @@ const ImageSubmission = () => {
 
         const ctrl = new AbortController();
         areaInspectRef.current = {
-            region: {
-                ...region,
-                cx: (region.x1 + region.x2) / 2,
-                cy: (region.y1 + region.y2) / 2,
-            },
+            panelPos: { x: magnifier.x, y: magnifier.y }, // pin the lens in panel space
+            region: region,
             abort: ctrl,
         };
         setAreaExtent({ state: 'loading' });
