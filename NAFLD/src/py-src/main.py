@@ -283,6 +283,7 @@ def undo_area_file(filename):
 
 
 @app.route("/excluded-mask/<filename>", methods=['GET'])
+@app.route("/preview-excluded/<filename>", methods=['GET'])
 @login_required
 def excluded_mask_file(filename):
     """Return a base64 RGBA PNG that paints excluded (non-tissue) pixels
@@ -322,6 +323,7 @@ def analyze_area_file(filename):
 
 
 @app.route("/classify-area/<filename>", methods=['GET'])
+@app.route("/classify-mask-area/<filename>", methods=['GET'])
 @login_required
 def classify_area_file(filename):
     """Run VGG16+PCA+FCM on the magnifier region's mask. Returns membership scores."""

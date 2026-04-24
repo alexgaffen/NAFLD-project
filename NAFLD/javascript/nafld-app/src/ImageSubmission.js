@@ -539,7 +539,7 @@ const ImageSubmission = () => {
         }
         setIsLoadingExcluded(true);
         try {
-            const res = await apiFetch(`${API_BASE}/excluded-mask/${encodeURIComponent(uploadedFilename)}`);
+            const res = await apiFetch(`${API_BASE}/preview-excluded/${encodeURIComponent(uploadedFilename)}`);
             if (res.ok) {
                 const data = await res.json();
                 setExcludedOverlay(data.overlay);
@@ -594,7 +594,7 @@ const ImageSubmission = () => {
             });
 
         // Classify — VGG16 + PCA + FCM on the cropped mask region.
-        apiFetch(`${API_BASE}/classify-area/${encodeURIComponent(uploadedFilename)}?${params}`,
+        apiFetch(`${API_BASE}/classify-mask-area/${encodeURIComponent(uploadedFilename)}?${params}`,
             { signal: ctrl.signal })
             .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
             .then(data => {
