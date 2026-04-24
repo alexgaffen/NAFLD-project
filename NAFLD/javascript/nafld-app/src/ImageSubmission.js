@@ -91,6 +91,73 @@ const buildSseUrl = async (path) => {
     return `${API_BASE}${path}${sep}token=${encodeURIComponent(token)}`;
 };
 
+/**
+ * Black-slate overlay that animates a 1.5s random-pixel reveal whenever
+ * `trigger` changes. Used to mask transitions on the right (mask) panel
+ * so each new image surfaces through scattered white pixels.
+ */
+const RevealCanvas = ({ trigger, blackOnly }) => {
+    const ref = useRef(null);
+    useEffect(() => {
+        const canvas = ref.current;
+        if (!canvas) return;
+        const parent = canvas.parentElement;
+        if (!parent) return;
+        const sync = () => {
+            const w = parent.clientWidth;
+            const h = parent.clientHeight;
+            if (canvas.width !== w || canvas.height !== h) {
+                canvas.width = w;
+                canvas.height = h;
+            }
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, w, h);
+        };
+        sync();
+        canvas.style.opacity = '1';
+        canvas.style.display = 'block';
+        if (blackOnly) {
+            const ro = new ResizeObserver(sync);
+            ro.observe(parent);
+            return () => ro.disconnect();
+        }
+        const ctx = canvas.getContext('2d');
+        const start = performance.now();
+        const DURATION = 1500;
+        let raf;
+        const tick = (now) => {
+            const t = Math.min(1, (now - start) / DURATION);
+            const w = canvas.width;
+            const h = canvas.height;
+            // Spray random white squares; density grows over time so the
+            // reveal feels organic instead of uniform noise.
+            const density = 0.0035 + 0.012 * t;
+            const count = Math.floor(w * h * density / 12);
+            ctx.fillStyle = '#fff';
+            for (let i = 0; i < count; i++) {
+                const x = Math.random() * w;
+                const y = Math.random() * h;
+                const s = 2 + Math.random() * 4;
+                ctx.fillRect(x, y, s, s);
+            }
+            // Final 30% of the window: fade canvas out so the underlying
+            // image becomes visible.
+            const reveal = Math.max(0, (t - 0.7) / 0.3);
+            canvas.style.opacity = String(1 - reveal);
+            if (t < 1) {
+                raf = requestAnimationFrame(tick);
+            } else {
+                canvas.style.opacity = '0';
+                canvas.style.display = 'none';
+            }
+        };
+        raf = requestAnimationFrame(tick);
+        return () => { if (raf) cancelAnimationFrame(raf); };
+    }, [trigger, blackOnly]);
+    return <canvas ref={ref} className="reveal-canvas" />;
+};
+
 const ImageSubmission = () => {
     const [image, setSelectedImage] = useState(null);
     const [uploadedFilename, setUploadedFilename] = useState("");
@@ -145,6 +212,16 @@ const ImageSubmission = () => {
     const [excludedOverlay, setExcludedOverlay] = useState(null);
     const [isLoadingExcluded, setIsLoadingExcluded] = useState(false);
 
+    // Inverted (tissue) version of the excluded overlay, used as a CSS mask
+    // so the gloss-sweep animation only flows over non-green pixels during
+    // extent calculation.
+    const [tissueMaskUrl, setTissueMaskUrl] = useState(null);
+
+    // Top medical-green slider that drives vertical scrolling of the
+    // diagnosis report (replaces the native scrollbar).
+    const reportScrollRef = useRef(null);
+    const [reportScroll, setReportScroll] = useState({ frac: 0, max: 0 });
+
     // Area inspection (Q key while magnifier active): kicks off a fast
     // extent + classify on the region under the lens. Auto-cancels
     // when the cursor leaves the locked region.
@@ -161,6 +238,76 @@ const ImageSubmission = () => {
     }, []);
 
     const displayedResult = analysisResult || previewResult;
+
+    // Kick off a background fetch for the green excluded overlay as soon as
+    // analysis starts, so we have an inverted "tissue" mask ready to clip
+    // the gloss-sweep animation to non-green pixels.
+    useEffect(() => {
+        if (!isAnalyzing || !uploadedFilename) return;
+        if (excludedOverlay || isLoadingExcluded) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await apiFetch(`${API_BASE}/preview-excluded/${encodeURIComponent(uploadedFilename)}`);
+                if (cancelled || !res.ok) return;
+                const data = await res.json();
+                if (!cancelled && data?.overlay) setExcludedOverlay(data.overlay);
+            } catch { /* best-effort; gloss falls back to full-area */ }
+        })();
+        return () => { cancelled = true; };
+    }, [isAnalyzing, uploadedFilename, excludedOverlay, isLoadingExcluded]);
+
+    // Build the inverted alpha mask whenever the excluded overlay changes.
+    useEffect(() => {
+        if (!excludedOverlay) { setTissueMaskUrl(null); return; }
+        let cancelled = false;
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+            if (cancelled) return;
+            try {
+                const c = document.createElement('canvas');
+                c.width = img.naturalWidth;
+                c.height = img.naturalHeight;
+                const ctx = c.getContext('2d');
+                ctx.drawImage(img, 0, 0);
+                const data = ctx.getImageData(0, 0, c.width, c.height);
+                const px = data.data;
+                for (let i = 0; i < px.length; i += 4) {
+                    const a = px[i + 3];
+                    px[i] = 255; px[i + 1] = 255; px[i + 2] = 255;
+                    px[i + 3] = 255 - a;
+                }
+                ctx.putImageData(data, 0, 0);
+                setTissueMaskUrl(c.toDataURL('image/png'));
+            } catch { /* tainted canvas etc. -> skip mask, gloss covers all */ }
+        };
+        img.src = excludedOverlay;
+        return () => { cancelled = true; };
+    }, [excludedOverlay]);
+
+    // Sync the report-column slider with the inner scroll container.
+    const updateReportScroll = useCallback(() => {
+        const el = reportScrollRef.current;
+        if (!el) return;
+        const max = Math.max(0, el.scrollHeight - el.clientHeight);
+        const frac = max > 0 ? (el.scrollTop / max) * 100 : 0;
+        setReportScroll(prev => (prev.frac === frac && prev.max === max ? prev : { frac, max }));
+    }, []);
+    useEffect(() => {
+        const el = reportScrollRef.current;
+        if (!el) return;
+        updateReportScroll();
+        const onScroll = () => updateReportScroll();
+        el.addEventListener('scroll', onScroll, { passive: true });
+        const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(updateReportScroll) : null;
+        if (ro) ro.observe(el);
+        return () => { el.removeEventListener('scroll', onScroll); if (ro) ro.disconnect(); };
+    }, [updateReportScroll]);
+    useEffect(() => { updateReportScroll(); }, [
+        analysisResult, classificationResult, isAnalyzing, isClassifying,
+        deltaMap, hasLocalEdits, adjustedRatio, updateReportScroll,
+    ]);
 
     // Compute where the object-fit:contain image actually renders inside the panel
     const computeImgRect = useCallback(() => {
@@ -1032,6 +1179,17 @@ const ImageSubmission = () => {
         const imgX = (posX - offsetX) / rw;
         const imgY = (posY - offsetY) / rh;
         if (imgX < 0 || imgX > 1 || imgY < 0 || imgY > 1) return null;
+        // Hide the lens entirely if any part of its frame would extend outside
+        // the rendered image (so we never magnify void/letterbox regions).
+        const halfPx = MAGNIFIER_SIZE / 2;
+        const imgPxX = offsetX + imgX * rw;
+        const imgPxY = offsetY + imgY * rh;
+        if (
+            imgPxX - halfPx < offsetX ||
+            imgPxY - halfPx < offsetY ||
+            imgPxX + halfPx > offsetX + rw ||
+            imgPxY + halfPx > offsetY + rh
+        ) return null;
         const effectiveZoom = Math.max(magnifierZoom, 1.001);
         const bgW = nw * effectiveZoom * scale;
         const bgH = nh * effectiveZoom * scale;
@@ -1146,7 +1304,7 @@ const ImageSubmission = () => {
                 <div className="comparison-grid">
                     {/* Original — with tile overlay during analysis */}
                     <div
-                        className={`img-panel drop-zone ${isDragging ? 'drag-over' : ''} ${magnifier && displayedResult?.original_image ? 'magnifier-active' : ''} ${isBusy ? 'busy' : ''}`}
+                        className={`img-panel drop-zone ${isDragging ? 'drag-over' : ''} ${magnifier && displayedResult?.original_image && !isClassifying ? 'magnifier-active' : ''} ${isBusy ? 'busy' : ''}`}
                         onDragOver={handleDragOver}
                         onDragLeave={handleDragLeave}
                         onDrop={handleDrop}
@@ -1181,8 +1339,31 @@ const ImageSubmission = () => {
                         )}
 
                 {/* Magnifier overlay */}
-                        {magnifier && displayedResult?.original_image && renderMagnifier(originalImgRef, 'left')}
-                        {magnifier && displayedResult?.original_image && <div className="magnifier-dim" />}
+                        {magnifier && displayedResult?.original_image && !isClassifying && renderMagnifier(originalImgRef, 'left')}
+                        {magnifier && displayedResult?.original_image && !isClassifying && <div className="magnifier-dim" />}
+
+                        {/* Gloss sweep over non-green tissue while extent is being computed. */}
+                        {isAnalyzing && displayedResult?.original_image && imgContentRect && (
+                            <div
+                                className="gloss-sweep"
+                                style={{
+                                    left: imgContentRect.left,
+                                    top: imgContentRect.top,
+                                    width: imgContentRect.width,
+                                    height: imgContentRect.height,
+                                    ...(tissueMaskUrl ? {
+                                        WebkitMaskImage: `url(${tissueMaskUrl})`,
+                                        maskImage: `url(${tissueMaskUrl})`,
+                                        WebkitMaskSize: '100% 100%',
+                                        maskSize: '100% 100%',
+                                        WebkitMaskRepeat: 'no-repeat',
+                                        maskRepeat: 'no-repeat',
+                                        WebkitMaskMode: 'alpha',
+                                        maskMode: 'alpha',
+                                    } : {})
+                                }}
+                            />
+                        )}
 
                         {/* Filename & change message at bottom of frame */}
                         {image && (
@@ -1254,9 +1435,9 @@ const ImageSubmission = () => {
 
                     {/* Fibrosis mask */}
                     <div
-                        className={`img-panel ${magnifier && displayedMaskSrc ? 'magnifier-active' : ''}`}
-                        onMouseMove={displayedMaskSrc ? handlePanelMouseMove : undefined}
-                        onMouseLeave={displayedMaskSrc ? handlePanelMouseLeave : undefined}
+                        className={`img-panel ${magnifier && displayedMaskSrc && !isClassifying ? 'magnifier-active' : ''}`}
+                        onMouseMove={displayedMaskSrc && !isClassifying ? handlePanelMouseMove : undefined}
+                        onMouseLeave={displayedMaskSrc && !isClassifying ? handlePanelMouseLeave : undefined}
                     >
                         <span className="img-label accent">fibrosisai Mask</span>
                         {displayedMaskSrc ? (
@@ -1264,8 +1445,17 @@ const ImageSubmission = () => {
                         ) : (
                             <div className="placeholder-text">Fibrosis mask appears after analysis</div>
                         )}
-                        {magnifier && displayedMaskSrc && renderMagnifier(filteredImgRef, 'right')}
-                        {magnifier && displayedMaskSrc && <div className="magnifier-dim" />}
+
+                        {/* Black slate appears the moment the user uploads, then
+                            random-pixel reveals the mask on each new image. */}
+                        {image && (
+                            <RevealCanvas
+                                trigger={displayedMaskSrc || 'slate'}
+                                blackOnly={!displayedMaskSrc}
+                            />
+                        )}
+                        {magnifier && displayedMaskSrc && !isClassifying && renderMagnifier(filteredImgRef, 'right')}
+                        {magnifier && displayedMaskSrc && !isClassifying && <div className="magnifier-dim" />}
                         {displayedMaskSrc && (
                             !analysisResult ? (
                                 <div className="download-mask-btn" style={{ color: '#a855f7', borderColor: '#a855f7', pointerEvents: 'none', cursor: 'default', background: 'transparent' }}>
@@ -1401,6 +1591,29 @@ const ImageSubmission = () => {
                         ↓ Download CSV
                     </button>
                 </div>
+
+                {/* Top scroll slider (medical green) — replaces the column scrollbar. */}
+                <input
+                    type="range"
+                    className="report-scroll-slider"
+                    min={0}
+                    max={100}
+                    step={0.1}
+                    value={reportScroll.frac}
+                    disabled={reportScroll.max <= 0}
+                    onChange={(e) => {
+                        const v = parseFloat(e.target.value);
+                        const el = reportScrollRef.current;
+                        if (!el) return;
+                        const max = Math.max(0, el.scrollHeight - el.clientHeight);
+                        el.scrollTop = (v / 100) * max;
+                    }}
+                    style={{ '--fill': `${reportScroll.frac}%` }}
+                    aria-label="Scroll diagnosis report"
+                    title={reportScroll.max > 0 ? 'Drag to scroll the diagnosis report' : 'No additional content to scroll'}
+                />
+
+                <div className="report-scroll-area" ref={reportScrollRef}>
 
                 {/* Extent calculation in progress — animated indeterminate indicator */}
                 {isAnalyzing && (
@@ -1562,6 +1775,7 @@ const ImageSubmission = () => {
                     </div>
                 )}
 
+                </div>
             </aside>
 
             {showResetConfirm && (
