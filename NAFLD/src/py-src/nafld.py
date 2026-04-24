@@ -50,7 +50,69 @@ psr_results = []
 
 # Cache for deconvolution data so rethresholding is instant.
 # Keyed by cache_key (string) -> { red_stain, tissue_mask, img_shape }
-_deconv_cache = {}
+# WORKER-SHARED via on-disk pickle: gunicorn workers each have their own
+# in-memory dict, so we transparently fall through to a shared file when
+# the local in-memory copy is empty (e.g. analysis ran in worker A but
+# Q-area-inspect lands on worker B). Only one entry is cached at a time
+# (see cache_deconv_data) so disk usage stays bounded.
+import pickle as _pickle
+import tempfile as _tempfile
+_DECONV_CACHE_FILE = os.path.join(_tempfile.gettempdir(), 'nafld_deconv_cache.pkl')
+
+
+class _SharedDeconvCache:
+    def __init__(self):
+        self._mem = {}
+
+    def _load_from_disk(self):
+        try:
+            if os.path.exists(_DECONV_CACHE_FILE):
+                with open(_DECONV_CACHE_FILE, 'rb') as f:
+                    return _pickle.load(f)
+        except Exception as e:
+            print(f"[Cache] disk load failed: {e}")
+        return None
+
+    def _save_to_disk(self, key, entry):
+        try:
+            with open(_DECONV_CACHE_FILE, 'wb') as f:
+                _pickle.dump({'key': key, 'entry': entry}, f, protocol=_pickle.HIGHEST_PROTOCOL)
+        except Exception as e:
+            print(f"[Cache] disk save failed: {e}")
+
+    def get(self, key):
+        if key in self._mem:
+            return self._mem[key]
+        # Cache miss in this worker — try the shared disk copy
+        disk = self._load_from_disk()
+        if disk is not None and disk.get('key') == key:
+            self._mem[key] = disk['entry']
+            return disk['entry']
+        return None
+
+    def __setitem__(self, key, entry):
+        self._mem[key] = entry
+        self._save_to_disk(key, entry)
+
+    def __contains__(self, key):
+        return self.get(key) is not None
+
+    def clear(self):
+        self._mem.clear()
+        try:
+            if os.path.exists(_DECONV_CACHE_FILE):
+                os.remove(_DECONV_CACHE_FILE)
+        except Exception:
+            pass
+
+    def flush_to_disk(self, key):
+        """Re-persist the (mutated) entry currently held in memory under `key`."""
+        entry = self._mem.get(key)
+        if entry is not None:
+            self._save_to_disk(key, entry)
+
+
+_deconv_cache = _SharedDeconvCache()
 
 # Point to the 'models' subfolder
 model_save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
@@ -330,6 +392,7 @@ def rethreshold(cache_key, new_threshold):
     result_image[mask == 255] = [255, 255, 255]
     mask_pil = Image.fromarray(result_image)
 
+    _deconv_cache.flush_to_disk(cache_key)
     return mask_pil, total_selected, ratio, tissue_count
 
 
@@ -405,7 +468,9 @@ def rethreshold_area(cache_key, delta, x1, y1, x2, y2):
 
     entry['has_local_edits'] = True
 
-    return _recompute_mask(entry)
+    out = _recompute_mask(entry)
+    _deconv_cache.flush_to_disk(cache_key)
+    return out
 
 
 def reset_area(cache_key, x1, y1, x2, y2):
@@ -435,7 +500,9 @@ def reset_area(cache_key, x1, y1, x2, y2):
     entry['threshold_delta'][py1:py2, px1:px2] = 0.0
     entry['has_local_edits'] = bool(np.any(entry['threshold_delta'] != 0))
 
-    return _recompute_mask(entry)
+    out = _recompute_mask(entry)
+    _deconv_cache.flush_to_disk(cache_key)
+    return out
 
 
 def undo_area(cache_key):
@@ -452,7 +519,9 @@ def undo_area(cache_key):
     entry['_last_edit_region'] = None
     entry['has_local_edits'] = bool(np.any(entry['threshold_delta'] != 0))
 
-    return _recompute_mask(entry)
+    out = _recompute_mask(entry)
+    _deconv_cache.flush_to_disk(cache_key)
+    return out
 
 
 def get_delta_map(cache_key):

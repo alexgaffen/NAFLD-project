@@ -1,0 +1,10 @@
+import paramiko
+s = paramiko.SSHClient()
+s.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+s.connect('217.77.7.228', username='alex', password='123456')
+stdin, stdout, stderr = s.exec_command('sudo -S -p "" cat /var/log/nginx/access.log | grep -E "analyze|classify|preview" | tail -30', get_pty=True)
+stdin.write('123456\n')
+stdin.flush()
+print(stdout.read().decode())
+print(stderr.read().decode())
+s.close()

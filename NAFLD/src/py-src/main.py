@@ -300,27 +300,22 @@ def excluded_mask_file(filename):
 def _parse_region_args():
     """Parse normalised x1,y1,x2,y2 query params. Returns tuple or None on error."""
     try:
-        x1 = float(request.args.get('x1', ''))
-        y1 = float(request.args.get('y1', ''))
-        x2 = float(request.args.get('x2', ''))
-        y2 = float(request.args.get('y2', ''))
-        app.logger.info(f"PARSED REGION: x1={x1} y1={y1} x2={x2} y2={y2}")
-        return (x1, y1, x2, y2)
-    except (ValueError, TypeError) as e:
-        app.logger.error(f"REGION PARSE ERROR: {e} -> {request.args}")
+        return (float(request.args.get('x1', '')),
+                float(request.args.get('y1', '')),
+                float(request.args.get('x2', '')),
+                float(request.args.get('y2', '')))
+    except (ValueError, TypeError):
         return None
 
 @app.route("/analyze-area/<filename>", methods=['GET'])
 @login_required
 def analyze_area_file(filename):
     """Return fibrosis extent for a normalised region under the magnifier."""
-    app.logger.info(f"ANALYZE AREA REQUEST for {filename}")
     region = _parse_region_args()
     if region is None:
         return jsonify({'error': 'Missing or invalid x1/y1/x2/y2'}), 400
     result = analyze_area(filename, *region)
     if result is None:
-        app.logger.error(f"analyze_area returned None for {filename} region {region}")
         return jsonify({'error': 'No cached data or invalid region'}), 404
     result['status'] = 'success'
     return jsonify(result), 200
@@ -330,13 +325,11 @@ def analyze_area_file(filename):
 @login_required
 def classify_area_file(filename):
     """Run VGG16+PCA+FCM on the magnifier region's mask. Returns membership scores."""
-    app.logger.info(f"CLASSIFY AREA REQUEST for {filename}")
     region = _parse_region_args()
     if region is None:
         return jsonify({'error': 'Missing or invalid x1/y1/x2/y2'}), 400
     result = classify_area(filename, *region)
     if result is None:
-        app.logger.error(f"classify_area returned None for {filename} region {region}")
         return jsonify({'error': 'No cached data or invalid region'}), 404
     return jsonify(result), 200
 
