@@ -1197,7 +1197,7 @@ const ImageSubmission = () => {
                                             title={showExcluded ? 'Hide excluded pixels' : 'Highlight pixels excluded from extent %'}
                                             disabled={isLoadingExcluded}
                                         >
-                                            {isLoadingExcluded ? '…' : showExcluded ? '● Excluded' : '○ Excluded'}
+                                            {isLoadingExcluded ? '…' : showExcluded ? '● what was excluded?' : '○ what was excluded?'}
                                         </button>
                                     )}
                                     {isAnalyzing && <button className="cancel-diagnosis-btn" onClick={() => window.location.reload()}>× Cancel Diagnosis</button>}
@@ -1267,9 +1267,15 @@ const ImageSubmission = () => {
                         {magnifier && displayedMaskSrc && renderMagnifier(filteredImgRef, 'right')}
                         {magnifier && displayedMaskSrc && <div className="magnifier-dim" />}
                         {displayedMaskSrc && (
-                            <button className="download-mask-btn" onClick={handleDownloadMask} title="Download fibrosis mask">
-                                ↓ Save Mask
-                            </button>
+                            !analysisResult ? (
+                                <div className="download-mask-btn" style={{ color: '#a855f7', borderColor: '#a855f7', pointerEvents: 'none', cursor: 'default', background: 'transparent' }}>
+                                    preview only
+                                </div>
+                            ) : (
+                                <button className="download-mask-btn" onClick={handleDownloadMask} title="Download fibrosis mask">
+                                    ↓ Save Mask
+                                </button>
+                            )
                         )}
 
                         {/* Classify scan tile overlay — on filtered image during classification */}
