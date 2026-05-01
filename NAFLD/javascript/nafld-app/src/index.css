@@ -22,7 +22,7 @@ html, body, #root {
   display: flex;
   align-items: center;
   gap: 1rem;
-  padding: 0.5rem 3.25rem 0.5rem 1.25rem;
+  padding: 0.5rem 6.6rem 0.5rem 1.25rem;
   background: #16202b;
   border-bottom: 3px solid rgba(255,255,255,0.85);
   flex-shrink: 0;
@@ -697,10 +697,16 @@ html, body, #root {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
+.threshold-control-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
 .threshold-slider {
   -webkit-appearance: none;
   appearance: none;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   height: 4px;
   background: #4a6478;
   border-radius: 2px;
@@ -725,6 +731,23 @@ html, body, #root {
   background: #4ecdc4;
   border: 2px solid #0f1923;
   cursor: pointer;
+}
+.threshold-number-input {
+  width: 5.6rem;
+  height: 1.8rem;
+  border: 1px solid #3a4f63;
+  border-radius: 0.35rem;
+  background: #0f1923;
+  color: #fff;
+  font-size: 0.78rem;
+  font-family: 'Consolas', 'Courier New', monospace;
+  text-align: right;
+  padding: 0 0.45rem;
+  outline: none;
+}
+.threshold-number-input:focus {
+  border-color: #4ecdc4;
+  box-shadow: 0 0 0 2px rgba(78, 205, 196, 0.15);
 }
 .threshold-hint {
   display: flex;
@@ -1115,6 +1138,51 @@ html, body, #root {
   transform: scale(1.1);
 }
 
+.result-bank-btn {
+  position: fixed;
+  top: 0.5rem;
+  right: 3.4rem;
+  z-index: 100;
+  width: 32px;
+  height: 28px;
+  border-radius: 0.4rem;
+  border: 1px solid #4ecdc4;
+  background: #16202b;
+  color: #4ecdc4;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s, transform 0.15s;
+}
+.result-bank-btn:hover {
+  background: #253545;
+  transform: translateY(-1px);
+}
+.result-bank-btn svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.result-bank-count {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #f7b731;
+  color: #0a0f16;
+  font-size: 0.62rem;
+  font-weight: 800;
+  line-height: 16px;
+}
+
 /* ── Help Overlay ── */
 .help-modal {
   position: relative;
@@ -1193,6 +1261,152 @@ html, body, #root {
   border-top: 1px solid #253545;
 }
 
+.result-bank-modal {
+  background: #1a2a3a;
+  border: 1px solid #3a4f63;
+  border-radius: 0.5rem;
+  padding: 1.25rem;
+  width: min(760px, 92vw);
+  max-height: 88vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  animation: modalFadeIn 0.2s ease;
+}
+.result-bank-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.result-bank-title {
+  color: #4ecdc4;
+  font-size: 1rem;
+  font-weight: 700;
+  margin: 0;
+}
+.result-bank-subtitle {
+  color: #8a9bae;
+  font-size: 0.72rem;
+  margin-top: 0.15rem;
+}
+.result-bank-close {
+  width: 28px;
+  height: 28px;
+  border: 1px solid #3a4f63;
+  border-radius: 0.35rem;
+  background: transparent;
+  color: #8a9bae;
+  font-size: 1rem;
+  cursor: pointer;
+}
+.result-bank-close:hover {
+  color: #fff;
+  border-color: #4ecdc4;
+}
+.result-bank-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+.result-bank-action {
+  padding: 0.45rem 0.85rem;
+  border: 1px solid #4ecdc4;
+  border-radius: 0.35rem;
+  background: rgba(78, 205, 196, 0.12);
+  color: #4ecdc4;
+  font-size: 0.76rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.result-bank-action:hover:not(:disabled) {
+  background: #4ecdc4;
+  color: #0a0f16;
+}
+.result-bank-action-muted {
+  border-color: #3a4f63;
+  background: transparent;
+  color: #8a9bae;
+}
+.result-bank-action-muted:hover:not(:disabled) {
+  background: #253545;
+  color: #fff;
+}
+.result-bank-action:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.result-bank-empty {
+  border: 1px dashed #3a4f63;
+  border-radius: 0.5rem;
+  padding: 2rem 1rem;
+  text-align: center;
+  color: #8a9bae;
+  font-size: 0.82rem;
+}
+.result-bank-table-wrap {
+  overflow: auto;
+  border: 1px solid #253545;
+  border-radius: 0.5rem;
+}
+.result-bank-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 620px;
+}
+.result-bank-table th,
+.result-bank-table td {
+  padding: 0.55rem 0.65rem;
+  border-bottom: 1px solid #253545;
+  text-align: left;
+  font-size: 0.76rem;
+  vertical-align: middle;
+}
+.result-bank-table th {
+  position: sticky;
+  top: 0;
+  background: #16202b;
+  color: #8a9bae;
+  font-weight: 700;
+}
+.result-bank-table tr:last-child td {
+  border-bottom: none;
+}
+.result-bank-image {
+  display: block;
+  max-width: 220px;
+  color: #fff;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.result-bank-saved-at {
+  display: block;
+  color: #8a9bae;
+  font-size: 0.65rem;
+  margin-top: 0.1rem;
+}
+.result-bank-remove {
+  width: 24px;
+  height: 24px;
+  border: 1px solid #3a4f63;
+  border-radius: 0.3rem;
+  background: transparent;
+  color: #8a9bae;
+  cursor: pointer;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+.result-bank-remove:hover {
+  color: #e74c3c;
+  border-color: #e74c3c;
+}
+.bank-message-modal {
+  text-align: left;
+}
+
 /* ── Classify / Diagnose button ── */
 .classify-prompt {
   display: flex;
@@ -1268,9 +1482,38 @@ html, body, #root {
   gap: 0.5rem;
   margin-top: 0.5rem;
 }
+.classify-actions-row .save-result-btn,
 .classify-actions-row .reclassify-btn,
 .classify-actions-row .analyze-patches-btn {
   flex: 1;
+}
+.classify-actions-row .reclassify-btn {
+  margin-top: 0;
+}
+.save-result-btn {
+  padding: 0.45rem 0.8rem;
+  border: 1px solid #4ecdc4;
+  border-radius: 0.4rem;
+  background: rgba(78, 205, 196, 0.12);
+  color: #4ecdc4;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s, opacity 0.2s;
+}
+.save-result-btn:hover:not(:disabled) {
+  background: #4ecdc4;
+  color: #0a0f16;
+}
+.save-result-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.bank-message {
+  margin: 0.45rem 0 0;
+  color: #f7b731;
+  font-size: 0.72rem;
+  text-align: center;
 }
 
 /* Analyze Patch Results button */

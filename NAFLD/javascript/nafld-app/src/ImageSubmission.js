@@ -2,6 +2,91 @@
 import { createPortal } from "react-dom";
 
 const API_BASE = process.env.REACT_APP_API_URL || "http://127.0.0.1:5000";
+const RESULT_BANK_KEY = "fibrosisai_session_result_bank";
+const MAX_RESULT_BANK_SIZE = 10;
+
+const CLASS_SCORE_COLUMNS = [
+    { key: 'None', label: 'None (F0)' },
+    { key: 'Perisinusoidal', label: 'Periportal (F1)' },
+    { key: 'Bridging', label: 'Bridging (F3)' },
+    { key: 'Cirrosis', label: 'Cirrhosis (F4)' },
+];
+
+const csvEscape = (value) => {
+    const text = value === null || value === undefined ? '' : String(value);
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+};
+
+const formatPercent = (value, digits = 2) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? `${number.toFixed(digits)}%` : '';
+};
+
+const formatThreshold = (value) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? number.toFixed(3) : '';
+};
+
+const getDominantClassification = (scores) => {
+    if (!scores) return '';
+    let best = null;
+    CLASS_SCORE_COLUMNS.forEach((column) => {
+        const score = Number(scores[column.key] || 0);
+        if (!best || score > best.score) best = { ...column, score };
+    });
+    return best ? best.label : '';
+};
+
+const getResultIdentity = (record) => record?.uploaded_filename || record?.image_name || '';
+
+const buildResultsCsv = (records) => {
+    const headers = [
+        'image_name',
+        'uploaded_filename',
+        'saved_at',
+        'extent_percentage',
+        'current_threshold',
+        'ai_threshold',
+        'local_area_edits',
+        'primary_classification',
+        ...CLASS_SCORE_COLUMNS.map(column => column.label),
+    ];
+
+    const rows = records.map((record) => [
+        record.image_name,
+        record.uploaded_filename,
+        record.saved_at,
+        formatPercent(record.extent_percentage),
+        formatThreshold(record.current_threshold),
+        formatThreshold(record.ai_threshold),
+        record.has_local_edits ? 'yes' : 'no',
+        record.primary_classification,
+        ...CLASS_SCORE_COLUMNS.map(column => formatPercent((record.membership_scores?.[column.key] || 0) * 100, 0)),
+    ]);
+
+    return [headers, ...rows].map(row => row.map(csvEscape).join(',')).join('\n');
+};
+
+const downloadCsv = (filename, records) => {
+    const blob = new Blob([buildResultsCsv(records)], { type: 'text/csv;charset=utf-8;' });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', filename);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+};
+
+const loadStoredResultBank = () => {
+    try {
+        const parsed = JSON.parse(sessionStorage.getItem(RESULT_BANK_KEY) || '[]');
+        return Array.isArray(parsed) ? parsed.slice(0, MAX_RESULT_BANK_SIZE) : [];
+    } catch {
+        return [];
+    }
+};
 
 // ── Auth: transparent access-token refresh ──────────────────────────
 // The backend issues short-lived (30 min) access tokens and longer-lived
@@ -113,7 +198,12 @@ const ImageSubmission = () => {
     const [adjustedRatio, setAdjustedRatio] = useState(null);    // ratio from rethreshold
     const [adjustedMask, setAdjustedMask] = useState(null);      // base64 mask from rethreshold
     const [isRethresholding, setIsRethresholding] = useState(false);
+    const [thresholdDraft, setThresholdDraft] = useState("");
     const rethresholdTimer = useRef(null);
+
+    const [resultBank, setResultBank] = useState(loadStoredResultBank);
+    const [showResultBank, setShowResultBank] = useState(false);
+    const [bankMessage, setBankMessage] = useState("");
 
     // Magnifier state
     const [magnifier, setMagnifier] = useState(null); // { x, y } normalised 0-1
@@ -220,6 +310,18 @@ const ImageSubmission = () => {
         return () => ro.disconnect();
     }, [computeFilteredImgRect, displayedResult, adjustedMask]);
 
+    useEffect(() => {
+        if (userThreshold === null || userThreshold === undefined) {
+            setThresholdDraft("");
+            return;
+        }
+        setThresholdDraft(formatThreshold(userThreshold));
+    }, [userThreshold]);
+
+    useEffect(() => {
+        sessionStorage.setItem(RESULT_BANK_KEY, JSON.stringify(resultBank));
+    }, [resultBank]);
+
     // When analysis completes, pick up the auto threshold
     useEffect(() => {
         if (analysisResult?.threshold !== undefined) {
@@ -234,14 +336,16 @@ const ImageSubmission = () => {
 
     // Debounced rethreshold call (global — resets local edits)
     const handleThresholdChange = useCallback((value) => {
-        setUserThreshold(value);
+        const nextThreshold = Math.max(0, Number(value));
+        if (!Number.isFinite(nextThreshold)) return;
+        setUserThreshold(nextThreshold);
         if (rethresholdTimer.current) clearTimeout(rethresholdTimer.current);
         rethresholdTimer.current = setTimeout(async () => {
             if (!uploadedFilename) return;
             setIsRethresholding(true);
             try {
                 const res = await apiFetch(
-                    `${API_BASE}/rethreshold/${encodeURIComponent(uploadedFilename)}?threshold=${value}`
+                    `${API_BASE}/rethreshold/${encodeURIComponent(uploadedFilename)}?threshold=${nextThreshold}`
                 );
                 if (res.ok) {
                     const data = await res.json();
@@ -389,6 +493,25 @@ const ImageSubmission = () => {
         setShowResetConfirm(false);
         pendingResetAction.current = null;
     }, []);
+
+    const commitThresholdValue = useCallback((rawValue) => {
+        const parsed = Number(rawValue);
+        if (!Number.isFinite(parsed)) {
+            setThresholdDraft(userThreshold === null || userThreshold === undefined ? "" : formatThreshold(userThreshold));
+            return;
+        }
+        const nextThreshold = Math.max(0, parsed);
+        if (userThreshold !== null && Math.abs(nextThreshold - Number(userThreshold)) < 1e-9) {
+            setThresholdDraft(formatThreshold(userThreshold));
+            return;
+        }
+        const applyThreshold = () => handleThresholdChange(nextThreshold);
+        if (hasLocalEdits) {
+            requestConfirmReset(applyThreshold);
+        } else {
+            applyThreshold();
+        }
+    }, [handleThresholdChange, hasLocalEdits, requestConfirmReset, userThreshold]);
 
     // Reset area under observation to original AI threshold (Ctrl+R)
     const handleResetArea = useCallback(async () => {
@@ -620,6 +743,7 @@ const ImageSubmission = () => {
             // Escape closes help or confirm overlays
             if (e.key === 'Escape') {
                 if (showHelp) { setShowHelp(false); return; }
+                if (showResultBank) { setShowResultBank(false); return; }
                 if (showResetConfirm) { handleConfirmNo(); return; }
             }
             // Ctrl+Z: undo last modified square (works anytime)
@@ -670,7 +794,7 @@ const ImageSubmission = () => {
         };
         window.addEventListener('keydown', handler, true);
         return () => window.removeEventListener('keydown', handler, true);
-    }, [magnifier, autoThreshold, getMagnifierRegion, handleLocalDeltaChange, handleResetArea, handleUndoArea, showHelp, showResetConfirm, handleConfirmNo, handleAreaInspect]);
+    }, [magnifier, autoThreshold, getMagnifierRegion, handleLocalDeltaChange, handleResetArea, handleUndoArea, showHelp, showResultBank, showResetConfirm, handleConfirmNo, handleAreaInspect]);
 
     const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB per chunk
     const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024; // 10 MB -- use chunking above this
@@ -731,6 +855,7 @@ const ImageSubmission = () => {
 
         setSelectedImage(file);
         setErrorMessage("");
+        setBankMessage("");
         setPreviewResult(null);
         setAnalysisResult(null);
         setClassificationResult(null);
@@ -836,6 +961,52 @@ const ImageSubmission = () => {
     }, []);
 
     const isBusy = isUploading || isAnalyzing;
+    const fibrosisRatio = analysisResult?.fibrosis_ratio;
+
+    const getCurrentResultRecord = () => {
+        const extent = adjustedRatio !== null ? adjustedRatio : fibrosisRatio;
+        const scores = classificationResult?.membership_scores;
+        if (extent === undefined || classificationResult?.status !== 'success' || !scores) return null;
+        return {
+            image_name: image?.name || uploadedFilename || 'unknown_image',
+            uploaded_filename: uploadedFilename || '',
+            saved_at: new Date().toISOString(),
+            extent_percentage: Number(extent),
+            current_threshold: userThreshold,
+            ai_threshold: autoThreshold,
+            has_local_edits: Boolean(hasLocalEdits),
+            primary_classification: classificationResult.cluster_label || getDominantClassification(scores),
+            membership_scores: {
+                None: Number(scores.None || 0),
+                Perisinusoidal: Number(scores.Perisinusoidal || 0),
+                Bridging: Number(scores.Bridging || 0),
+                Cirrosis: Number(scores.Cirrosis || 0),
+            },
+        };
+    };
+
+    const currentResultRecord = getCurrentResultRecord();
+    const currentResultIdentity = getResultIdentity(currentResultRecord);
+    const savedCurrentIndex = currentResultIdentity
+        ? resultBank.findIndex(record => getResultIdentity(record) === currentResultIdentity)
+        : -1;
+    const canSaveCurrentResult = Boolean(
+        currentResultRecord &&
+        !maskChangedSinceClassify &&
+        !isBusy &&
+        !isClassifying &&
+        (savedCurrentIndex !== -1 || resultBank.length < MAX_RESULT_BANK_SIZE)
+    );
+    const saveCurrentLabel = !currentResultRecord
+        ? 'Save Current Result'
+        : maskChangedSinceClassify
+        ? 'Re-diagnose to Save'
+        : savedCurrentIndex !== -1
+        ? 'Update Saved Result'
+        : resultBank.length >= MAX_RESULT_BANK_SIZE
+        ? 'Result Bank Full'
+        : 'Save Current Result';
+
     const handleDragOver = (e) => { e.preventDefault(); if (!isBusy) setIsDragging(true); };
     const handleDragLeave = (e) => { e.preventDefault(); setIsDragging(false); };
     const handleDrop = (e) => {
@@ -850,29 +1021,52 @@ const ImageSubmission = () => {
     const handleClick = () => { if (!isBusy) fileInputRef.current?.click(); };
 
     const handleDownloadCsv = () => {
-        const extent = adjustedRatio !== null ? adjustedRatio : fibrosisRatio;
-        const scores = classificationResult?.membership_scores;
-        if (extent === undefined || !scores) { setErrorMessage("Complete a full diagnosis (including clustering) before downloading CSV."); return; }
-        const headers = ['image_name', 'extent_percentage', 'None (F0)', 'Periportal (F1)', 'Bridging (F3)', 'Cirrhosis (F4)'];
-        const values = [
-            image?.name || uploadedFilename,
-            `${Number(extent).toFixed(2)}%`,
-            `${((scores.None || 0) * 100).toFixed(0)}%`,
-            `${((scores.Perisinusoidal || 0) * 100).toFixed(0)}%`,
-            `${((scores.Bridging || 0) * 100).toFixed(0)}%`,
-            `${((scores.Cirrosis || 0) * 100).toFixed(0)}%`
-        ];
-        const csvContent = [headers.join(','), values.join(',')].join('\n');
-        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-        const url = window.URL.createObjectURL(blob);
-        const link = document.createElement('a');
+        if (!currentResultRecord || maskChangedSinceClassify) {
+            setErrorMessage("Complete an up-to-date diagnosis before downloading CSV.");
+            return;
+        }
         const baseName = image?.name ? image.name.replace(/\.[^.]+$/, '') : 'fibrosis';
-        link.href = url;
-        link.setAttribute('download', `${baseName}_results.csv`);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.URL.revokeObjectURL(url);
+        downloadCsv(`${baseName}_results.csv`, [currentResultRecord]);
+    };
+
+    const handleAddCurrentToBank = () => {
+        if (!currentResultRecord) {
+            setBankMessage('Complete diagnosis first.');
+            return;
+        }
+        if (maskChangedSinceClassify) {
+            setBankMessage('Re-diagnose before saving.');
+            return;
+        }
+
+        const identity = getResultIdentity(currentResultRecord);
+        const existingIndex = resultBank.findIndex(record => getResultIdentity(record) === identity);
+        if (existingIndex !== -1) {
+            setResultBank(previous => previous.map(record => getResultIdentity(record) === identity ? currentResultRecord : record));
+            setBankMessage('Saved result updated.');
+            return;
+        }
+        if (resultBank.length >= MAX_RESULT_BANK_SIZE) {
+            setBankMessage(`Result bank is full (${MAX_RESULT_BANK_SIZE}/${MAX_RESULT_BANK_SIZE}).`);
+            return;
+        }
+        setResultBank(previous => [...previous, currentResultRecord]);
+        setBankMessage('Result saved.');
+    };
+
+    const handleDownloadBankCsv = () => {
+        if (resultBank.length === 0) return;
+        downloadCsv('fibrosisai_session_results.csv', resultBank);
+    };
+
+    const handleRemoveBankResult = (identity) => {
+        setResultBank(previous => previous.filter(record => getResultIdentity(record) !== identity));
+        setBankMessage('Saved result removed.');
+    };
+
+    const handleClearResultBank = () => {
+        setResultBank([]);
+        setBankMessage('Result bank cleared.');
     };
 
     const handleDownloadMask = () => {
@@ -887,14 +1081,13 @@ const ImageSubmission = () => {
         link.remove();
     };
 
-    // Only show extent after full analysis — preview images still appear immediately
-    const fibrosisRatio = analysisResult?.fibrosis_ratio;
-    // Simple statuses for the UI label
-    const pipelineStatus = isAnalyzing
-        ? 'Running Diagnosis…'
-        : isUploading
-        ? `Uploading${uploadProgress > 0 && uploadProgress < 100 ? '… ' + uploadProgress + '%' : '…'}`
-        : null;
+    const thresholdSliderValue = Number(userThreshold ?? autoThreshold ?? 0);
+    const thresholdSliderMin = autoThreshold !== null
+        ? Math.max(0, Math.min(autoThreshold - 5, thresholdSliderValue))
+        : 0;
+    const thresholdSliderMax = autoThreshold !== null
+        ? Math.max(autoThreshold + 5, thresholdSliderValue)
+        : 10;
 
     const renderRadarChart = (data) => {
         if (!data) return null;
@@ -1140,6 +1333,13 @@ const ImageSubmission = () => {
         <div className="main-grid">
             {/* Help button — fixed top-right */}
             <button className="help-btn" onClick={() => setShowHelp(true)} title="Help &amp; Keybindings">?</button>
+            <button className="result-bank-btn" onClick={() => setShowResultBank(true)} title="Session result bank">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M5 4h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z" />
+                    <path d="M8 8h8M8 12h8M8 16h5" />
+                </svg>
+                <span className="result-bank-count">{resultBank.length}</span>
+            </button>
 
             {/* ── Left: images + extent description ── */}
             <div className="images-col">
@@ -1396,7 +1596,7 @@ const ImageSubmission = () => {
                     <button
                         className="csv-btn-inline"
                         onClick={handleDownloadCsv}
-                        disabled={!classificationResult?.membership_scores || isUploading || isAnalyzing}
+                        disabled={!currentResultRecord || maskChangedSinceClassify || isUploading || isAnalyzing}
                     >
                         ↓ Download CSV
                     </button>
@@ -1441,25 +1641,42 @@ const ImageSubmission = () => {
                         <div className="threshold-slider-wrapper">
                             <label className="threshold-label">
                                 Baseline Threshold
-                                <span className="threshold-value">{Number(userThreshold).toFixed(3)}</span>
+                                <span className="threshold-value">{formatThreshold(userThreshold)}</span>
                                 {isRethresholding && <span className="threshold-loading">⟳</span>}
                             </label>
-                            <input
-                                type="range"
-                                className="threshold-slider"
-                                min={Math.max(autoThreshold - 5, 0)}
-                                max={autoThreshold + 5}
-                                step={0.01}
-                                value={userThreshold}
-                                onChange={(e) => {
-                                    const v = parseFloat(e.target.value);
-                                    if (hasLocalEdits) {
-                                        requestConfirmReset(() => handleThresholdChange(v));
-                                        return;
-                                    }
-                                    handleThresholdChange(v);
-                                }}
-                            />
+                            <div className="threshold-control-row">
+                                <input
+                                    type="range"
+                                    className="threshold-slider"
+                                    min={thresholdSliderMin}
+                                    max={thresholdSliderMax}
+                                    step={0.01}
+                                    value={thresholdSliderValue}
+                                    onChange={(e) => {
+                                        const v = parseFloat(e.target.value);
+                                        if (hasLocalEdits) {
+                                            requestConfirmReset(() => handleThresholdChange(v));
+                                            return;
+                                        }
+                                        handleThresholdChange(v);
+                                    }}
+                                />
+                                <input
+                                    type="number"
+                                    className="threshold-number-input"
+                                    min="0"
+                                    step="0.001"
+                                    value={thresholdDraft}
+                                    aria-label="Baseline threshold value"
+                                    onChange={(e) => setThresholdDraft(e.target.value)}
+                                    onBlur={(e) => commitThresholdValue(e.target.value)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                            e.currentTarget.blur();
+                                        }
+                                    }}
+                                />
+                            </div>
                             <div className="threshold-hint">
                                 <span>More inclusive</span>
                                 <span>More restrictive</span>
@@ -1527,6 +1744,14 @@ const ImageSubmission = () => {
                                 </p>
                                 <div className="classify-actions-row">
                                     <button
+                                        className="save-result-btn"
+                                        onClick={handleAddCurrentToBank}
+                                        disabled={!canSaveCurrentResult}
+                                        title={maskChangedSinceClassify ? 'Re-run diagnosis before saving this result' : ''}
+                                    >
+                                        {saveCurrentLabel}
+                                    </button>
+                                    <button
                                         className="reclassify-btn"
                                         onClick={handleClassifyMask}
                                         disabled={!maskChangedSinceClassify}
@@ -1543,6 +1768,7 @@ const ImageSubmission = () => {
                                         </button>
                                     )}
                                 </div>
+                                {bankMessage && <p className="bank-message">{bankMessage}</p>}
                             </>
                         )}
                     </div>
@@ -1563,6 +1789,64 @@ const ImageSubmission = () => {
                 )}
 
             </aside>
+
+            {showResultBank && (
+                <div className="confirm-overlay" onClick={() => setShowResultBank(false)}>
+                    <div className="result-bank-modal" onClick={(e) => e.stopPropagation()}>
+                        <div className="result-bank-modal-header">
+                            <div>
+                                <h2 className="result-bank-title">Session Results</h2>
+                                <p className="result-bank-subtitle">{resultBank.length}/{MAX_RESULT_BANK_SIZE} saved</p>
+                            </div>
+                            <button className="result-bank-close" onClick={() => setShowResultBank(false)}>&times;</button>
+                        </div>
+
+                        <div className="result-bank-actions">
+                            <button className="result-bank-action" onClick={handleDownloadBankCsv} disabled={resultBank.length === 0}>Download CSV</button>
+                            <button className="result-bank-action result-bank-action-muted" onClick={handleClearResultBank} disabled={resultBank.length === 0}>Clear</button>
+                        </div>
+
+                        {resultBank.length === 0 ? (
+                            <div className="result-bank-empty">No saved results yet</div>
+                        ) : (
+                            <div className="result-bank-table-wrap">
+                                <table className="result-bank-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Image</th>
+                                            <th>Extent</th>
+                                            <th>Threshold</th>
+                                            <th>Diagnosis</th>
+                                            <th></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {resultBank.map((record) => {
+                                            const identity = getResultIdentity(record);
+                                            return (
+                                                <tr key={identity}>
+                                                    <td>
+                                                        <span className="result-bank-image">{record.image_name}</span>
+                                                        <span className="result-bank-saved-at">{record.saved_at ? new Date(record.saved_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</span>
+                                                    </td>
+                                                    <td>{formatPercent(record.extent_percentage)}</td>
+                                                    <td>{formatThreshold(record.current_threshold)}</td>
+                                                    <td>{record.primary_classification}</td>
+                                                    <td>
+                                                        <button className="result-bank-remove" onClick={() => handleRemoveBankResult(identity)} title="Remove saved result">&times;</button>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+
+                        {bankMessage && <p className="bank-message bank-message-modal">{bankMessage}</p>}
+                    </div>
+                </div>
+            )}
 
             {showResetConfirm && (
                 <div className="confirm-overlay" onClick={handleConfirmNo}>
@@ -1594,7 +1878,7 @@ const ImageSubmission = () => {
 
                         <div className="help-section">
                             <h3>Baseline Threshold</h3>
-                            <p>After analysis, the right panel provides a <strong>Baseline Threshold</strong> slider. This controls the global sensitivity for detecting fibrosis. Once you set a baseline you are happy with, <strong>stick to fine area adjustments</strong> rather than changing the baseline again. Changing the baseline resets all area edits. Use <em>Reset to baseline AI estimate</em> only for a full reset.</p>
+                            <p>After analysis, the right panel provides a <strong>Baseline Threshold</strong> slider and number field. This controls the global sensitivity for detecting fibrosis. Once you set a baseline you are happy with, <strong>stick to fine area adjustments</strong> rather than changing the baseline again. Changing the baseline resets all area edits. Use <em>Reset to baseline AI estimate</em> only for a full reset.</p>
                         </div>
 
                         <div className="help-section">

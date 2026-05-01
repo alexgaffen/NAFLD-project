@@ -427,9 +427,29 @@ def _recompute_mask(entry):
     return mask_pil, total_selected, ratio, tissue_count
 
 
+def _get_tissue_threshold_range(entry):
+    if 'tissue_threshold_range' in entry:
+        return entry['tissue_threshold_range']
+
+    red_stain = entry['red_stain']
+    tissue_mask = entry['tissue_mask']
+    tissue_vals = red_stain[tissue_mask]
+    tissue_vals = tissue_vals[np.isfinite(tissue_vals)]
+
+    if tissue_vals.size == 0:
+        entry['tissue_threshold_range'] = None
+    else:
+        entry['tissue_threshold_range'] = (
+            float(np.nextafter(np.min(tissue_vals), -np.inf)),
+            float(np.nextafter(np.max(tissue_vals), np.inf)),
+        )
+
+    return entry['tissue_threshold_range']
+
+
 def rethreshold_area(cache_key, delta, x1, y1, x2, y2):
     """Apply a relative threshold delta to a specific normalised region (0-1 coords).
-    Each pixel accumulates its own offset; clamped at +/-1.5.
+    Each pixel accumulates its own offset, limited to the useful tissue stain range.
     Returns (mask_pil, total_pixels, ratio, tissue_count) or None."""
     entry = _deconv_cache.get(cache_key)
     if entry is None:
@@ -461,10 +481,15 @@ def rethreshold_area(cache_key, delta, x1, y1, x2, y2):
         entry['undo_stack'].append(entry['threshold_delta'].copy())
         entry['_last_edit_region'] = current_region
 
-    MAX_DELTA = 1.5
     region = entry['threshold_delta'][py1:py2, px1:px2]
     region += delta
-    np.clip(region, -MAX_DELTA, MAX_DELTA, out=region)
+
+    threshold_range = _get_tissue_threshold_range(entry)
+    if threshold_range is not None:
+        min_threshold, max_threshold = threshold_range
+        min_delta = min(0.0, min_threshold - base_thresh)
+        max_delta = max(0.0, max_threshold - base_thresh)
+        np.clip(region, min_delta, max_delta, out=region)
 
     entry['has_local_edits'] = True
 
