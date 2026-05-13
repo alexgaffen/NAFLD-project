@@ -181,6 +181,9 @@ const ImageSubmission = () => {
     const [uploadedFilename, setUploadedFilename] = useState("");
     const [previewResult, setPreviewResult] = useState(null);
     const [analysisResult, setAnalysisResult] = useState(null);
+    const [unetImage, setUnetImage] = useState(null);
+    const [unetUploadedFilename, setUnetUploadedFilename] = useState("");
+    const [unetPreviewResult, setUnetPreviewResult] = useState(null);
     const [isUploading, setIsUploading] = useState(false);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [errorMessage, setErrorMessage] = useState("");
@@ -219,21 +222,42 @@ const ImageSubmission = () => {
     const [deltaMap, setDeltaMap] = useState(null); // base64 PNG of modified areas
     const [showHelp, setShowHelp] = useState(false);
 
-    // Classification from refined mask (separate from initial analysis)
-    const [classificationResult, setClassificationResult] = useState(null);
-    const [isClassifying, setIsClassifying] = useState(false);
-    const [classifyTileGrid, setClassifyTileGrid] = useState(null);
-    const [classifyProgress, setClassifyProgress] = useState(null);
-    const [worstPatchCoords, setWorstPatchCoords] = useState(null);
-    const [showWorstPatches, setShowWorstPatches] = useState(false);
-    const [maskChangedSinceClassify, setMaskChangedSinceClassify] = useState(false);
+    // Classification from refined mask — independent per algorithm tab.
+    // The two pipelines (classic threshold + U-Net Round 1) each carry
+    // their own classification result, progress, worst-patch overlay, etc.
+    const [classifyByAlgo, setClassifyByAlgo] = useState({
+        classic: { result: null, isClassifying: false, progress: null, tileGrid: null, worstPatches: null, showWorst: false, maskChanged: false, error: '' },
+        unet:    { result: null, isClassifying: false, progress: null, tileGrid: null, worstPatches: null, showWorst: false, maskChanged: false, error: '' },
+    });
+    const updateClassifyAlgo = useCallback((algo, patchOrFn) => {
+        setClassifyByAlgo(prev => {
+            const cur = prev[algo];
+            const patch = typeof patchOrFn === 'function' ? patchOrFn(cur) : patchOrFn;
+            return { ...prev, [algo]: { ...cur, ...patch } };
+        });
+    }, []);
     const [filteredImgContentRect, setFilteredImgContentRect] = useState(null);
-    const classifyGridInfo = useRef(null); // { rows, cols } from classification
+    const classifyGridInfo = useRef({ classic: null, unet: null });
 
     // Excluded-pixels overlay (shows what is removed from the extent denominator)
     const [showExcluded, setShowExcluded] = useState(false);
     const [excludedOverlay, setExcludedOverlay] = useState(null);
     const [isLoadingExcluded, setIsLoadingExcluded] = useState(false);
+
+    // Algorithm toggle: 'classic' = legacy threshold pipeline, 'unet' = Tiny U-Net (Round 1)
+    const [algorithm, setAlgorithm] = useState('classic');
+    const [unetResult, setUnetResult] = useState(null);          // { fibrosis_ratio, heatmap_image }
+    const [isAnalyzingUnet, setIsAnalyzingUnet] = useState(false);
+    const [unetPatchProgress, setUnetPatchProgress] = useState(null);
+    const [unetError, setUnetError] = useState('');
+    // U-Net threshold adjustment (parallel to classic auto/userThreshold).
+    // The U-Net baseline is fixed at 0.5 (matches inference.run_inference default).
+    const UNET_BASELINE_THRESHOLD = 0.5;
+    const [unetUserThreshold, setUnetUserThreshold] = useState(null);
+    const [unetAdjustedRatio, setUnetAdjustedRatio] = useState(null);
+    const [unetThresholdDraft, setUnetThresholdDraft] = useState('');
+    const [isRethresholdingUnet, setIsRethresholdingUnet] = useState(false);
+    const unetRethresholdTimer = useRef(null);
 
     // Area inspection (Q key while magnifier active): kicks off a fast
     // extent + classify on the region under the lens. Auto-cancels
@@ -250,7 +274,21 @@ const ImageSubmission = () => {
         setAreaClassify(null);
     }, []);
 
-    const displayedResult = analysisResult || previewResult;
+    const activeImage = algorithm === 'unet' ? unetImage : image;
+    const activeUploadedFilename = algorithm === 'unet' ? unetUploadedFilename : uploadedFilename;
+    const displayedResult = algorithm === 'unet' ? unetPreviewResult : (analysisResult || previewResult);
+
+    // Active classification slice for the currently-selected algorithm tab.
+    // Bare-name aliases keep the rest of the JSX/callbacks readable.
+    const _curCls = classifyByAlgo[algorithm];
+    const classificationResult = _curCls.result;
+    const isClassifying = _curCls.isClassifying;
+    const classifyProgress = _curCls.progress;
+    const classifyTileGrid = _curCls.tileGrid;
+    const worstPatchCoords = _curCls.worstPatches;
+    const showWorstPatches = _curCls.showWorst;
+    const maskChangedSinceClassify = _curCls.maskChanged;
+    const classificationError = _curCls.error;
 
     // Compute where the object-fit:contain image actually renders inside the panel
     const computeImgRect = useCallback(() => {
@@ -353,8 +391,7 @@ const ImageSubmission = () => {
                     setAdjustedMask(data.filtered_image);
                     setHasLocalEdits(false);
                     setDeltaMap(null);
-                    setMaskChangedSinceClassify(true);
-                    setShowWorstPatches(false);
+                    updateClassifyAlgo('classic', { maskChanged: true, showWorst: false, error: '' });
                 }
             } catch (e) {
                 console.error('Rethreshold error:', e);
@@ -363,6 +400,67 @@ const ImageSubmission = () => {
             }
         }, 150);
     }, [uploadedFilename]);
+
+    // U-Net threshold draft <-> userThreshold sync
+    useEffect(() => {
+        if (unetUserThreshold === null || unetUserThreshold === undefined) {
+            setUnetThresholdDraft('');
+            return;
+        }
+        setUnetThresholdDraft(formatThreshold(unetUserThreshold));
+    }, [unetUserThreshold]);
+
+    // Initialise U-Net user threshold once a result is available
+    useEffect(() => {
+        if (unetResult && unetUserThreshold === null) {
+            const baseline = unetResult.baseline_threshold ?? UNET_BASELINE_THRESHOLD;
+            setUnetUserThreshold(baseline);
+        }
+    }, [unetResult, unetUserThreshold]);
+
+    // Debounced re-threshold for the U-Net pipeline. Re-evaluates the
+    // cached probability map at a new threshold without re-running inference.
+    const handleUnetThresholdChange = useCallback((value) => {
+        const nextThreshold = Math.max(0, Number(value));
+        if (!Number.isFinite(nextThreshold)) return;
+        setUnetUserThreshold(nextThreshold);
+        if (unetRethresholdTimer.current) clearTimeout(unetRethresholdTimer.current);
+        unetRethresholdTimer.current = setTimeout(async () => {
+            if (!unetUploadedFilename) return;
+            setIsRethresholdingUnet(true);
+            try {
+                const res = await apiFetch(
+                    `${API_BASE}/rethreshold-unet/${encodeURIComponent(unetUploadedFilename)}?threshold=${nextThreshold}`
+                );
+                if (res.ok) {
+                    const data = await res.json();
+                    setUnetAdjustedRatio(data.fibrosis_ratio);
+                    setUnetResult(prev => prev ? { ...prev, heatmap_image: data.heatmap_image } : prev);
+                    updateClassifyAlgo('unet', { maskChanged: true, showWorst: false, error: '' });
+                }
+            } catch (e) {
+                console.error('U-Net rethreshold error:', e);
+            } finally {
+                setIsRethresholdingUnet(false);
+            }
+        }, 150);
+    }, [unetUploadedFilename, updateClassifyAlgo]);
+
+    const handleResetUnetThreshold = useCallback(() => {
+        if (!unetUploadedFilename) return;
+        if (unetRethresholdTimer.current) clearTimeout(unetRethresholdTimer.current);
+        setUnetUserThreshold(UNET_BASELINE_THRESHOLD);
+        setUnetAdjustedRatio(null);
+        setIsRethresholdingUnet(true);
+        apiFetch(`${API_BASE}/rethreshold-unet/${encodeURIComponent(unetUploadedFilename)}?threshold=${UNET_BASELINE_THRESHOLD}`)
+            .then(res => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`)))
+            .then(data => {
+                setUnetResult(prev => prev ? { ...prev, heatmap_image: data.heatmap_image, fibrosis_ratio: data.fibrosis_ratio } : prev);
+                updateClassifyAlgo('unet', { maskChanged: true, showWorst: false, error: '' });
+            })
+            .catch(e => console.error('U-Net threshold reset error:', e))
+            .finally(() => setIsRethresholdingUnet(false));
+    }, [unetUploadedFilename, updateClassifyAlgo]);
 
     // Magnifier: compute normalised position from mouse event on an img-panel
     // Only activates when cursor is over the actual rendered image content
@@ -444,6 +542,7 @@ const ImageSubmission = () => {
 
     // Debounced local area delta rethreshold (per-pixel)
     const handleLocalDeltaChange = useCallback((region) => {
+        if (algorithm !== 'classic') return;
         if (areaDeltaTimer.current) clearTimeout(areaDeltaTimer.current);
         areaDeltaTimer.current = setTimeout(async () => {
             if (!uploadedFilename || !region) return;
@@ -466,8 +565,7 @@ const ImageSubmission = () => {
                     setAdjustedMask(data.filtered_image);
                     setHasLocalEdits(true);
                     if (data.delta_map) setDeltaMap(data.delta_map);
-                    setMaskChangedSinceClassify(true);
-                    setShowWorstPatches(false);
+                    updateClassifyAlgo('classic', { maskChanged: true, showWorst: false, error: '' });
                 }
             } catch (e) {
                 console.error('Rethreshold area error:', e);
@@ -475,7 +573,7 @@ const ImageSubmission = () => {
                 setIsRethresholding(false);
             }
         }, 150);
-    }, [uploadedFilename]);
+    }, [algorithm, uploadedFilename]);
 
     // Confirmation overlay helpers
     const requestConfirmReset = useCallback((action) => {
@@ -515,6 +613,7 @@ const ImageSubmission = () => {
 
     // Reset area under observation to original AI threshold (Ctrl+R)
     const handleResetArea = useCallback(async () => {
+        if (algorithm !== 'classic') return;
         const region = getMagnifierRegion();
         if (!region || !uploadedFilename) return;
         setIsRethresholding(true);
@@ -532,18 +631,18 @@ const ImageSubmission = () => {
                 setAdjustedMask(data.filtered_image);
                 setHasLocalEdits(data.has_local_edits);
                 setDeltaMap(data.delta_map);
-                setMaskChangedSinceClassify(true);
-                setShowWorstPatches(false);
+                updateClassifyAlgo('classic', { maskChanged: true, showWorst: false, error: '' });
             }
         } catch (e) {
             console.error('Reset area error:', e);
         } finally {
             setIsRethresholding(false);
         }
-    }, [uploadedFilename, getMagnifierRegion]);
+    }, [algorithm, uploadedFilename, getMagnifierRegion]);
 
     // Undo last modified square (Ctrl+Z)
     const handleUndoArea = useCallback(async () => {
+        if (algorithm !== 'classic') return;
         if (!uploadedFilename) return;
         setIsRethresholding(true);
         try {
@@ -556,26 +655,37 @@ const ImageSubmission = () => {
                 setAdjustedMask(data.filtered_image);
                 setHasLocalEdits(data.has_local_edits);
                 setDeltaMap(data.delta_map);
-                setMaskChangedSinceClassify(true);
-                setShowWorstPatches(false);
+                updateClassifyAlgo('classic', { maskChanged: true, showWorst: false, error: '' });
             }
         } catch (e) {
             console.error('Undo area error:', e);
         } finally {
             setIsRethresholding(false);
         }
-    }, [uploadedFilename]);
+    }, [algorithm, uploadedFilename]);
 
-    // Classify from refined mask (SSE streaming with tile progress)
+    // Classify from refined mask (SSE streaming with tile progress).
+    // Algorithm-aware: classic uses /classify-mask/, U-Net uses /classify-mask-unet/.
+    // All state writes are scoped to the active algorithm tab so the two
+    // pipelines remain truly independent.
     const handleClassifyMask = useCallback(async () => {
-        if (!uploadedFilename) return;
-        setIsClassifying(true);
-        setClassificationResult(null);
-        setClassifyTileGrid(null);
-        setClassifyProgress(null);
-        setWorstPatchCoords(null);
-        setShowWorstPatches(false);
-        classifyGridInfo.current = null;
+        const algo = algorithm;
+        const filename = algo === 'unet' ? unetUploadedFilename : uploadedFilename;
+        if (!filename) {
+            updateClassifyAlgo(algo, { error: `Upload an image on the ${algo === 'unet' ? 'U-Net' : 'Classic'} page before diagnosing.` });
+            return;
+        }
+        const endpoint = algo === 'unet' ? '/classify-mask-unet/' : '/classify-mask/';
+        updateClassifyAlgo(algo, {
+            isClassifying: true,
+            result: null,
+            tileGrid: null,
+            progress: null,
+            worstPatches: null,
+            showWorst: false,
+            error: '',
+        });
+        classifyGridInfo.current[algo] = null;
 
         const maxRetries = 3;
         let lastError = null;
@@ -583,33 +693,38 @@ const ImageSubmission = () => {
         for (let attempt = 0; attempt < maxRetries; attempt++) {
             if (attempt > 0) {
                 await new Promise(r => setTimeout(r, 1000));
-                setClassifyTileGrid(null);
-                setClassifyProgress(null);
+                updateClassifyAlgo(algo, { tileGrid: null, progress: null });
             }
             try {
                 const result = await new Promise((resolve, reject) => {
                     let settled = false;
                     let evtSource = null;
-                    buildSseUrl(`/classify-mask/${encodeURIComponent(uploadedFilename)}`)
+                    buildSseUrl(`${endpoint}${encodeURIComponent(filename)}`)
                         .then((url) => {
                             evtSource = new EventSource(url);
                             evtSource.onmessage = (event) => {
                                 try {
                                     const msg = JSON.parse(event.data);
                                     if (msg.type === 'progress') {
-                                        setClassifyProgress({ current: msg.current, total: msg.total, tissue_patches: msg.tissue_patches });
-                                        if (msg.grid_rows !== undefined) {
-                                            setClassifyTileGrid(prev => {
+                                        updateClassifyAlgo(algo, cur => {
+                                            const patch = { progress: { current: msg.current, total: msg.total, tissue_patches: msg.tissue_patches } };
+                                            if (msg.grid_rows !== undefined) {
                                                 const r = msg.grid_rows, c = msg.grid_cols;
+                                                const prev = cur.tileGrid;
                                                 const tiles = prev && prev.tiles.length === r * c ? [...prev.tiles] : new Array(r * c).fill(0);
                                                 tiles[msg.tile_row * c + msg.tile_col] = msg.is_tissue ? 2 : 1;
-                                                return { rows: r, cols: c, tiles };
-                                            });
-                                        }
+                                                patch.tileGrid = { rows: r, cols: c, tiles };
+                                            }
+                                            return patch;
+                                        });
                                     } else if (msg.type === 'result') {
                                         settled = true;
                                         evtSource.close();
                                         resolve(msg.data);
+                                    } else if (msg.type === 'error') {
+                                        settled = true;
+                                        evtSource.close();
+                                        reject(new Error(msg.error || 'Classification failed'));
                                     }
                                 } catch (e) {
                                     if (!settled) { settled = true; evtSource.close(); reject(e); }
@@ -621,16 +736,19 @@ const ImageSubmission = () => {
                         })
                         .catch((e) => { if (!settled) { settled = true; reject(e); } });
                 });
-                setClassificationResult(result);
+                if (!result || result.status !== 'success') {
+                    throw new Error(result?.message || result?.error || 'Classification failed');
+                }
+                const patch = { result, maskChanged: false };
                 if (result && result.worst_patches) {
-                    setWorstPatchCoords(result.worst_patches);
-                    classifyGridInfo.current = {
+                    patch.worstPatches = result.worst_patches;
+                    classifyGridInfo.current[algo] = {
                         rows: result.grid_rows, cols: result.grid_cols,
                         imgH: result.img_h, imgW: result.img_w,
                         patchSize: result.patch_size || 512,
                     };
                 }
-                setMaskChangedSinceClassify(false);
+                updateClassifyAlgo(algo, patch);
                 lastError = null;
                 break;
             } catch (e) {
@@ -641,11 +759,10 @@ const ImageSubmission = () => {
         if (lastError) {
             console.error('Classify mask error after retries:', lastError);
             setErrorMessage('Classification failed or connection lost.');
+            updateClassifyAlgo(algo, { result: null, error: lastError.message || 'Classification failed or connection lost.' });
         }
-        setIsClassifying(false);
-        setClassifyTileGrid(null);
-        setClassifyProgress(null);
-    }, [uploadedFilename]);
+        updateClassifyAlgo(algo, { isClassifying: false, tileGrid: null, progress: null });
+    }, [uploadedFilename, unetUploadedFilename, algorithm, updateClassifyAlgo]);
 
     // Toggle the green "excluded pixels" overlay on the original image.
     // The overlay paints exactly the pixels that were dropped from the
@@ -679,6 +796,7 @@ const ImageSubmission = () => {
     // area under the lens. Both calls share an AbortController so a mouse
     // move (handled in handlePanelMouseMove) cancels them in flight.
     const handleAreaInspect = useCallback(() => {
+        if (algorithm !== 'classic') return;
         if (!uploadedFilename || !magnifier) return;
         const region = getMagnifierRegion();
         if (!region) return;
@@ -734,7 +852,7 @@ const ImageSubmission = () => {
                 if (areaInspectRef.current.abort !== ctrl) return;
                 setAreaClassify({ state: 'error' });
             });
-    }, [uploadedFilename, magnifier, getMagnifierRegion]);
+    }, [algorithm, uploadedFilename, magnifier, getMagnifierRegion]);
 
     // Key handler: Ctrl+Z = undo (anytime), Ctrl+R = reset area (magnifier active),
     // arrows = zoom & area delta (magnifier active), Escape = close overlays
@@ -853,31 +971,41 @@ const ImageSubmission = () => {
             return;
         }
 
-        setSelectedImage(file);
+        const isUnetUpload = algorithm === 'unet';
+        const setActiveImage = isUnetUpload ? setUnetImage : setSelectedImage;
+        const setActiveUploadedFilename = isUnetUpload ? setUnetUploadedFilename : setUploadedFilename;
+
+        setActiveImage(file);
         setErrorMessage("");
         setBankMessage("");
-        setPreviewResult(null);
-        setAnalysisResult(null);
-        setClassificationResult(null);
-        setClassifyTileGrid(null);
-        setClassifyProgress(null);
-        setWorstPatchCoords(null);
-        setShowWorstPatches(false);
-        setMaskChangedSinceClassify(false);
+        setActiveUploadedFilename("");
+        updateClassifyAlgo(algorithm, { result: null, isClassifying: false, progress: null, tileGrid: null, worstPatches: null, showWorst: false, maskChanged: false, error: '' });
+        classifyGridInfo.current[algorithm] = null;
         setFilteredImgContentRect(null);
-        classifyGridInfo.current = null;
-        setUploadedFilename("");
         setUploadProgress(0);
-        setAutoThreshold(null);
-        setUserThreshold(null);
-        setAdjustedRatio(null);
-        setAdjustedMask(null);
         setMagnifier(null);
-        setHasLocalEdits(false);
         setShowResetConfirm(false);
-        setDeltaMap(null);
         setShowExcluded(false);
         setExcludedOverlay(null);
+
+        if (isUnetUpload) {
+            setUnetPreviewResult(null);
+            setUnetResult(null);
+            setUnetPatchProgress(null);
+            setUnetError('');
+            setUnetUserThreshold(null);
+            setUnetAdjustedRatio(null);
+            setUnetThresholdDraft('');
+        } else {
+            setPreviewResult(null);
+            setAnalysisResult(null);
+            setAutoThreshold(null);
+            setUserThreshold(null);
+            setAdjustedRatio(null);
+            setAdjustedMask(null);
+            setHasLocalEdits(false);
+            setDeltaMap(null);
+        }
 
         try {
             setIsUploading(true);
@@ -887,9 +1015,19 @@ const ImageSubmission = () => {
                 ? await uploadChunked(file)
                 : await uploadSimple(file);
 
-            setUploadedFilename(filename);
+            setActiveUploadedFilename(filename);
 
             const isSvsTif = file.name.match(/\.(svs|tif|tiff)$/i);
+
+            if (isUnetUpload) {
+                const previewResponse = await apiFetch(`${API_BASE}/preview/${encodeURIComponent(filename)}`);
+                if (previewResponse.ok) {
+                    setUnetPreviewResult(await previewResponse.json());
+                }
+                setIsUploading(false);
+                await runUnetAnalysis(filename);
+                return;
+            }
 
             if (isSvsTif) {
                 // Large slides: fetch a quick preview so the user sees something while patches process
@@ -958,23 +1096,89 @@ const ImageSubmission = () => {
             setIsAnalyzing(false);
             setPatchProgress(null);
         }
-    }, []);
+    }, [algorithm, updateClassifyAlgo]);
 
-    const isBusy = isUploading || isAnalyzing;
-    const fibrosisRatio = analysisResult?.fibrosis_ratio;
+    const isBusy = isUploading || isAnalyzing || isAnalyzingUnet;
+    const classicFibrosisRatio = analysisResult?.fibrosis_ratio;
+    const fibrosisRatio = algorithm === 'unet'
+        ? unetResult?.fibrosis_ratio
+        : classicFibrosisRatio;
+
+    // U-Net inference runs only after an upload made while the U-Net page is active.
+    const runUnetAnalysis = useCallback(async (filename) => {
+        if (!filename) return;
+        setIsAnalyzingUnet(true);
+        setUnetPatchProgress({ current: 0, total: 0, tissue_patches: 0 });
+        setUnetError('');
+        setUnetUserThreshold(null);
+        setUnetAdjustedRatio(null);
+        updateClassifyAlgo('unet', { result: null, tileGrid: null, progress: null, worstPatches: null, showWorst: false, maskChanged: false, error: '' });
+        try {
+            const data = await new Promise((resolve, reject) => {
+                let settled = false;
+                let evtSource = null;
+                buildSseUrl(`/analyze-unet-stream/${encodeURIComponent(filename)}`)
+                    .then((url) => {
+                        evtSource = new EventSource(url);
+                        evtSource.onmessage = (event) => {
+                            try {
+                                const msg = JSON.parse(event.data);
+                                if (msg.type === 'progress') {
+                                    setUnetPatchProgress({
+                                        current: msg.current,
+                                        total: msg.total,
+                                        tissue_patches: msg.tissue_patches,
+                                    });
+                                } else if (msg.type === 'result') {
+                                    settled = true;
+                                    evtSource.close();
+                                    resolve(msg.data);
+                                } else if (msg.type === 'error') {
+                                    settled = true;
+                                    evtSource.close();
+                                    reject(new Error(msg.error || 'U-Net analysis failed.'));
+                                }
+                            } catch (err) {
+                                if (!settled) { settled = true; evtSource.close(); reject(err); }
+                            }
+                        };
+                        evtSource.onerror = () => {
+                            if (!settled) { settled = true; evtSource.close(); reject(new Error('U-Net analysis stream connection lost')); }
+                        };
+                    })
+                    .catch((e) => { if (!settled) { settled = true; reject(e); } });
+            });
+            setUnetResult(data);
+        } catch (e) {
+            console.error('U-Net analysis error:', e);
+            setUnetError(e.message || 'U-Net analysis failed.');
+            setUnetResult(null);
+        } finally {
+            setIsAnalyzingUnet(false);
+            setUnetPatchProgress(null);
+        }
+    }, [updateClassifyAlgo]);
+
+    // Note: switching tabs never reuses the other algorithm's uploaded file.
 
     const getCurrentResultRecord = () => {
-        const extent = adjustedRatio !== null ? adjustedRatio : fibrosisRatio;
+        let extent;
+        if (algorithm === 'unet') {
+            extent = unetAdjustedRatio !== null ? unetAdjustedRatio : fibrosisRatio;
+        } else {
+            extent = adjustedRatio !== null ? adjustedRatio : fibrosisRatio;
+        }
         const scores = classificationResult?.membership_scores;
         if (extent === undefined || classificationResult?.status !== 'success' || !scores) return null;
         return {
-            image_name: image?.name || uploadedFilename || 'unknown_image',
-            uploaded_filename: uploadedFilename || '',
+            image_name: activeImage?.name || activeUploadedFilename || 'unknown_image',
+            uploaded_filename: activeUploadedFilename || '',
             saved_at: new Date().toISOString(),
             extent_percentage: Number(extent),
-            current_threshold: userThreshold,
-            ai_threshold: autoThreshold,
-            has_local_edits: Boolean(hasLocalEdits),
+            current_threshold: algorithm === 'unet' ? unetUserThreshold : userThreshold,
+            ai_threshold: algorithm === 'unet' ? UNET_BASELINE_THRESHOLD : autoThreshold,
+            has_local_edits: algorithm === 'classic' ? Boolean(hasLocalEdits) : false,
+            algorithm,
             primary_classification: classificationResult.cluster_label || getDominantClassification(scores),
             membership_scores: {
                 None: Number(scores.None || 0),
@@ -1025,7 +1229,7 @@ const ImageSubmission = () => {
             setErrorMessage("Complete an up-to-date diagnosis before downloading CSV.");
             return;
         }
-        const baseName = image?.name ? image.name.replace(/\.[^.]+$/, '') : 'fibrosis';
+        const baseName = activeImage?.name ? activeImage.name.replace(/\.[^.]+$/, '') : 'fibrosis';
         downloadCsv(`${baseName}_results.csv`, [currentResultRecord]);
     };
 
@@ -1070,11 +1274,13 @@ const ImageSubmission = () => {
     };
 
     const handleDownloadMask = () => {
-        const maskSrc = adjustedMask || displayedResult?.filtered_image;
+        const maskSrc = algorithm === 'unet'
+            ? unetResult?.heatmap_image
+            : (adjustedMask || displayedResult?.filtered_image);
         if (!maskSrc) return;
         const link = document.createElement('a');
         link.href = maskSrc;
-        const baseName = image?.name ? image.name.replace(/\.[^.]+$/, '') : 'fibrosis';
+        const baseName = activeImage?.name ? activeImage.name.replace(/\.[^.]+$/, '') : 'fibrosis';
         link.setAttribute('download', `${baseName}_mask.jpg`);
         document.body.appendChild(link);
         link.click();
@@ -1197,8 +1403,11 @@ const ImageSubmission = () => {
         );
     };
 
-    // The mask to display: use adjusted mask if user moved slider, else the original
-    const displayedMaskSrc = adjustedMask || displayedResult?.filtered_image;
+    // The mask to display: use adjusted mask if user moved slider, else the original.
+    // When the U-Net algorithm is selected, swap in its heatmap image instead.
+    const displayedMaskSrc = algorithm === 'unet'
+        ? (unetResult?.heatmap_image || null)
+        : (adjustedMask || displayedResult?.filtered_image);
 
     // (Tile overlay during analyze removed — the analyze pass no longer
     // does per-tile work, so there's nothing to visualise. The classify
@@ -1282,7 +1491,7 @@ const ImageSubmission = () => {
         }
 
         // "Press Q" hint only when no inspection is active
-        const showQHint = !areaExtent && !areaClassify && analysisResult;
+        const showQHint = algorithm === 'classic' && !areaExtent && !areaClassify && analysisResult;
 
         return createPortal((
             <div className="magnifier-group" style={{
@@ -1357,17 +1566,17 @@ const ImageSubmission = () => {
                         <span className="img-label">Original PSR Staining</span>
                         {displayedResult?.original_image ? (
                             <img ref={originalImgRef} onLoad={computeImgRect} alt="Original PSR" src={displayedResult.original_image} className="preview-image" draggable="false" onDragStart={(e) => e.preventDefault()} />
-                        ) : image ? (
-                            image.name.match(/\.(tif|tiff|svs)$/i) ? (
+                        ) : activeImage ? (
+                            activeImage.name.match(/\.(tif|tiff|svs)$/i) ? (
                                 <div className="placeholder-text" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', alignItems: 'center' }}>
                                     <span className="loading-hourglass" />
-                                    <span>{image.name}</span>
+                                    <span>{activeImage.name}</span>
                                     <span style={{ fontSize: '0.75rem' }}>Generating preview...</span>
                                 </div>
                             ) : (
                                 <img
                                     alt="Selected"
-                                    src={URL.createObjectURL(image)}
+                                    src={URL.createObjectURL(activeImage)}
                                     className="preview-image"
                                     draggable="false"
                                     onDragStart={(e) => e.preventDefault()}
@@ -1385,22 +1594,24 @@ const ImageSubmission = () => {
                         {magnifier && displayedResult?.original_image && <div className="magnifier-dim" />}
 
                         {/* Filename & change message at bottom of frame */}
-                        {image && (
+                        {activeImage && (
                             <div className="img-panel-footer">
-                                <span className="img-panel-filename">{image.name}</span>
+                                <span className="img-panel-filename">{activeImage.name}</span>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                                     {!isBusy && <span className="img-panel-change" onClick={handleClick}>Click or drop to change</span>}
-                                    {displayedResult?.original_image && uploadedFilename && !isBusy && (
+                                    {algorithm === 'classic' && displayedResult?.original_image && uploadedFilename && !isBusy && (
                                         <button
                                             className={`excluded-toggle-btn${showExcluded ? ' active' : ''}`}
                                             onClick={(e) => { e.stopPropagation(); handleToggleExcluded(); }}
+                                            onMouseEnter={() => setMagnifier(null)}
+                                            onMouseMove={(e) => { e.stopPropagation(); setMagnifier(null); }}
                                             title={showExcluded ? 'Hide excluded pixels' : 'Highlight pixels excluded from extent %'}
                                             disabled={isLoadingExcluded}
                                         >
                                             {isLoadingExcluded ? '…' : showExcluded ? '● what was excluded?' : '○ what was excluded?'}
                                         </button>
                                     )}
-                                    {isAnalyzing && <button className="cancel-diagnosis-btn" onClick={() => window.location.reload()}>× Cancel Diagnosis</button>}
+                                    {(isAnalyzing || isAnalyzingUnet) && <button className="cancel-diagnosis-btn" onClick={() => window.location.reload()}>× Cancel Diagnosis</button>}
                                 </div>
                             </div>
                         )}
@@ -1408,7 +1619,7 @@ const ImageSubmission = () => {
                         {/* Tile grid overlay removed — analyze no longer scans tile-by-tile. */}
 
                         {/* Excluded-pixels overlay (green = not counted in extent denominator) */}
-                        {showExcluded && excludedOverlay && imgContentRect && (
+                        {algorithm === 'classic' && showExcluded && excludedOverlay && imgContentRect && (
                             <img
                                 alt="Excluded pixels"
                                 src={excludedOverlay}
@@ -1427,12 +1638,14 @@ const ImageSubmission = () => {
 
 
                         {/* Green progress bar at bottom of upload image */}
-                        {(isUploading || isAnalyzing) && (
+                        {(isUploading || isAnalyzing || isAnalyzingUnet) && (
                             <div className="img-progress-bar-track">
                                 <div
                                     className="img-progress-bar-fill"
                                     style={{
-                                        width: isAnalyzing && patchProgress
+                                        width: isAnalyzingUnet && unetPatchProgress
+                                            ? `${Math.round((unetPatchProgress.current / unetPatchProgress.total) * 100)}%`
+                                            : isAnalyzing && patchProgress
                                             ? `${Math.round((patchProgress.current / patchProgress.total) * 100)}%`
                                             : isUploading
                                             ? `${uploadProgress}%`
@@ -1448,7 +1661,11 @@ const ImageSubmission = () => {
                             accept=".svs,.tif,.tiff,.jpg,.jpeg,.png,.bmp"
                             style={{ display: 'none' }}
                             disabled={isBusy}
-                            onChange={(e) => handleFile(e.target.files[0])}
+                            onChange={(e) => {
+                                const file = e.target.files[0];
+                                e.target.value = '';
+                                handleFile(file);
+                            }}
                         />
                     </div>
 
@@ -1458,21 +1675,36 @@ const ImageSubmission = () => {
                         onMouseMove={displayedMaskSrc ? handlePanelMouseMove : undefined}
                         onMouseLeave={displayedMaskSrc ? handlePanelMouseLeave : undefined}
                     >
-                        <span className="img-label accent">fibrosisai Mask</span>
+                        <span className="img-label accent">{algorithm === 'unet' ? 'U-Net (Round 1) Heatmap' : 'fibrosisai Mask'}</span>
                         {displayedMaskSrc ? (
                             <img ref={filteredImgRef} onLoad={computeFilteredImgRect} alt="Fibrosis mask" src={displayedMaskSrc} className="preview-image" draggable="false" onDragStart={(e) => e.preventDefault()} />
                         ) : (
-                            <div className="placeholder-text">Fibrosis mask appears after analysis</div>
+                            <div className="placeholder-text">
+                                {algorithm === 'unet'
+                                    ? (isAnalyzingUnet ? 'U-Net heatmap appears after patch inference' : 'U-Net heatmap appears after analysis')
+                                    : 'Fibrosis mask appears after analysis'}
+                            </div>
                         )}
                         {magnifier && displayedMaskSrc && renderMagnifier(filteredImgRef, 'right')}
                         {magnifier && displayedMaskSrc && <div className="magnifier-dim" />}
                         {displayedMaskSrc && (
-                            !analysisResult ? (
-                                <div className="download-mask-btn" style={{ color: '#a855f7', borderColor: '#a855f7', pointerEvents: 'none', cursor: 'default', background: 'transparent' }}>
+                            !(algorithm === 'unet' ? unetResult : analysisResult) ? (
+                                <div
+                                    className="download-mask-btn"
+                                    style={{ color: '#a855f7', borderColor: '#a855f7', pointerEvents: 'none', cursor: 'default', background: 'transparent' }}
+                                    onMouseEnter={() => setMagnifier(null)}
+                                    onMouseMove={(e) => { e.stopPropagation(); setMagnifier(null); }}
+                                >
                                     preview only
                                 </div>
                             ) : (
-                                <button className="download-mask-btn" onClick={handleDownloadMask} title="Download fibrosis mask">
+                                <button
+                                    className="download-mask-btn"
+                                    onClick={handleDownloadMask}
+                                    onMouseEnter={() => setMagnifier(null)}
+                                    onMouseMove={(e) => { e.stopPropagation(); setMagnifier(null); }}
+                                    title="Download fibrosis mask"
+                                >
                                     ↓ Save Mask
                                 </button>
                             )
@@ -1505,7 +1737,7 @@ const ImageSubmission = () => {
                         )}
 
                         {/* Red outlines for worst patches — pixel-accurate positioning */}
-                        {showWorstPatches && worstPatchCoords && filteredImgContentRect && classifyGridInfo.current && (
+                        {showWorstPatches && worstPatchCoords && filteredImgContentRect && classifyGridInfo.current?.[algorithm] && (
                             <div className="worst-patches-overlay" style={{
                                 left: filteredImgContentRect.left,
                                 top: filteredImgContentRect.top,
@@ -1513,7 +1745,7 @@ const ImageSubmission = () => {
                                 height: filteredImgContentRect.height,
                             }}>
                                 {worstPatchCoords.map((p, i) => {
-                                    const gi = classifyGridInfo.current;
+                                    const gi = classifyGridInfo.current[algorithm];
                                     // Map pixel coords to display coords using actual image dimensions
                                     const scaleX = filteredImgContentRect.width / gi.imgW;
                                     const scaleY = filteredImgContentRect.height / gi.imgH;
@@ -1537,7 +1769,7 @@ const ImageSubmission = () => {
 
                 {/* Area-only adjustment message + binding indicators (replaces extent description when magnifier active) */}
                 <div className="extent-description">
-                    {magnifier && displayedResult?.original_image ? (
+                    {algorithm === 'classic' && magnifier && displayedResult?.original_image ? (
                         <div className="binding-indicators">
                             <p className="magnifier-area-msg">◀ ▶ magnifying glass threshold adjustments apply to the area under observation only</p>
                             <div className="binding-row">
@@ -1569,15 +1801,28 @@ const ImageSubmission = () => {
                         </div>
                     ) : (
                         <div className="report-card info-card">
-                            <p>
-                                <strong>Visualization & Extent:</strong> White pixels indicate detected collagen fibers
-                                isolated via colour deconvolution and adaptive thresholding.
-                            </p>
-                            <p style={{ marginTop: '0.4rem' }}>
-                                <strong>Staging:</strong> Disease category is classified by analyzing the
-                                architectural patterns of these fibers using a VGG16 neural network and Fuzzy C-Means clustering.
-                            </p>
-                            {analysisResult?.patch_count && (
+                            {algorithm === 'unet' ? (
+                                <>
+                                    <p>
+                                        <strong>Visualization & Extent:</strong> The heatmap shows Tiny U-Net Round 1 fibrosis probability across the uploaded image.
+                                    </p>
+                                    <p style={{ marginTop: '0.4rem' }}>
+                                        <strong>Staging:</strong> Disease category is classified from the U-Net mask using the same VGG16, PCA, and Fuzzy C-Means classifier.
+                                    </p>
+                                </>
+                            ) : (
+                                <>
+                                    <p>
+                                        <strong>Visualization & Extent:</strong> White pixels indicate detected collagen fibers
+                                        isolated via colour deconvolution and adaptive thresholding.
+                                    </p>
+                                    <p style={{ marginTop: '0.4rem' }}>
+                                        <strong>Staging:</strong> Disease category is classified by analyzing the
+                                        architectural patterns of these fibers using a VGG16 neural network and Fuzzy C-Means clustering.
+                                    </p>
+                                </>
+                            )}
+                            {algorithm === 'classic' && analysisResult?.patch_count && (
                                 <p style={{ marginTop: '0.4rem', fontSize: '0.72rem' }}>
                                     Patch-based analysis: {analysisResult.patch_count} tissue patches processed
                                 </p>
@@ -1596,29 +1841,102 @@ const ImageSubmission = () => {
                     <button
                         className="csv-btn-inline"
                         onClick={handleDownloadCsv}
-                        disabled={!currentResultRecord || maskChangedSinceClassify || isUploading || isAnalyzing}
+                        disabled={!currentResultRecord || maskChangedSinceClassify || isUploading || isAnalyzing || isAnalyzingUnet}
                     >
                         ↓ Download CSV
                     </button>
                 </div>
 
+                {/* ── Algorithm toggle (Classic vs U-Net Round 1) ── */}
+                <div className="report-card" style={{ borderColor: '#a855f7', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                    <p className="report-label" style={{ color: '#a855f7' }}>Detection Algorithm</p>
+                    <div style={{ display: 'flex', gap: '0.4rem' }}>
+                        <button
+                            type="button"
+                            onClick={() => setAlgorithm('classic')}
+                            disabled={isBusy}
+                            style={{
+                                flex: 1,
+                                padding: '0.45rem 0.6rem',
+                                fontSize: '0.78rem',
+                                fontWeight: 600,
+                                borderRadius: '4px',
+                                border: `1px solid ${algorithm === 'classic' ? '#4ecdc4' : '#444'}`,
+                                background: algorithm === 'classic' ? '#4ecdc4' : 'transparent',
+                                color: algorithm === 'classic' ? '#0b1220' : '#cfd8dc',
+                                cursor: isBusy ? 'not-allowed' : 'pointer',
+                            }}
+                        >
+                            Classic algorithm
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => { setAlgorithm('unet'); setUnetError(''); }}
+                            disabled={isBusy}
+                            style={{
+                                flex: 1,
+                                padding: '0.45rem 0.6rem',
+                                fontSize: '0.78rem',
+                                fontWeight: 600,
+                                borderRadius: '4px',
+                                border: `1px solid ${algorithm === 'unet' ? '#a855f7' : '#444'}`,
+                                background: algorithm === 'unet' ? '#a855f7' : 'transparent',
+                                color: algorithm === 'unet' ? '#fff' : '#cfd8dc',
+                                cursor: isBusy ? 'not-allowed' : 'pointer',
+                            }}
+                        >
+                            U-Net (Round 1)
+                        </button>
+                    </div>
+                    {algorithm === 'unet' && unetError && (
+                        <p style={{ color: '#ff6b6b', fontSize: '0.72rem', margin: 0 }}>{unetError}</p>
+                    )}
+                    {algorithm === 'unet' && !unetUploadedFilename && !isUploading && !isAnalyzingUnet && (
+                        <p style={{ color: '#cfd8dc', fontSize: '0.72rem', margin: 0 }}>
+                            Upload an image on the U-Net page to run the U-Net pipeline.
+                        </p>
+                    )}
+                    {algorithm === 'classic' && !uploadedFilename && !isAnalyzing && !isUploading && (
+                        <p style={{ color: '#cfd8dc', fontSize: '0.72rem', margin: 0 }}>
+                            Upload an image on the Classic page to run the classic pipeline.
+                        </p>
+                    )}
+                </div>
+
                 {/* Extent calculation in progress — animated indeterminate indicator */}
-                {isAnalyzing && (
-                    <div className="report-card" style={{ borderColor: '#4ecdc4' }}>
-                        <p className="report-label" style={{ color: '#4ecdc4', fontWeight: 600 }}>
-                            Extent Calculation in Progress<span className="extent-dots" />
+                {(isAnalyzing || (algorithm === 'unet' && isAnalyzingUnet)) && (
+                    <div className="report-card" style={{ borderColor: algorithm === 'unet' ? '#a855f7' : '#4ecdc4' }}>
+                        <p className="report-label" style={{ color: algorithm === 'unet' ? '#a855f7' : '#4ecdc4', fontWeight: 600 }}>
+                            {algorithm === 'unet' ? 'U-Net Patch Inference in Progress' : 'Extent Calculation in Progress'}<span className="extent-dots" />
                         </p>
                         <div className="extent-scan-track">
                             <div className="extent-scan-fill" />
                         </div>
                         <p style={{ fontSize: '0.72rem', color: '#fff', marginTop: '0.3rem', marginBottom: 0 }}>
-                            Deconvolving PSR stain · sweeping adaptive threshold · isolating collagen pixels<span className="extent-dots" />
+                            {algorithm === 'unet'
+                                ? `Running Tiny U-Net on image patches${unetPatchProgress ? ` · ${unetPatchProgress.current}/${unetPatchProgress.total}` : ''}`
+                                : 'Deconvolving PSR stain · sweeping adaptive threshold · isolating collagen pixels'}<span className="extent-dots" />
                         </p>
                     </div>
                 )}
 
-                <div className="report-card" style={{ border: '1px solid #4ecdc4' }}>
-                    <p className="report-label">Fibrosis Extent</p>
+                <div className="report-card" style={{ border: `1px solid ${algorithm === 'unet' ? '#a855f7' : '#4ecdc4'}` }}>
+                    <p className="report-label">
+                        Fibrosis Extent
+                        <span style={{
+                            marginLeft: '0.5rem',
+                            fontSize: '0.65rem',
+                            fontWeight: 600,
+                            padding: '0.1rem 0.4rem',
+                            borderRadius: '3px',
+                            background: algorithm === 'unet' ? '#a855f7' : '#4ecdc4',
+                            color: algorithm === 'unet' ? '#fff' : '#0b1220',
+                            textTransform: 'uppercase',
+                            letterSpacing: '0.05em',
+                        }}>
+                            {algorithm === 'unet' ? 'U-Net (R1)' : 'Classic'}
+                        </span>
+                    </p>
                     <div className="extent-bar-track">
                         <div
                             className="extent-bar-fill"
@@ -1626,18 +1944,21 @@ const ImageSubmission = () => {
                         />
                     </div>
                     <p className="report-value">
-                        {fibrosisRatio !== undefined ? `${Number(fibrosisRatio).toFixed(2)}%` : '--'}
-                        {adjustedRatio !== null && (
+                        {fibrosisRatio !== undefined && fibrosisRatio !== null ? `${Number(fibrosisRatio).toFixed(2)}%` : '--'}
+                        {algorithm === 'classic' && adjustedRatio !== null && (
                             <span className="adjusted-ratio"> → {Number(adjustedRatio).toFixed(2)}%</span>
                         )}
+                        {algorithm === 'unet' && unetAdjustedRatio !== null && (
+                            <span className="adjusted-ratio"> → {Number(unetAdjustedRatio).toFixed(2)}%</span>
+                        )}
                     </p>
-                    {hasLocalEdits && (
+                    {algorithm === 'classic' && hasLocalEdits && (
                         <div className="local-edits-badge">
                             <span>■ Area adjustments applied</span>
                             <button className="undo-area-btn" onClick={handleUndoArea} title="Undo last area modification (Ctrl+Z)">↩ Undo Step</button>
                         </div>
                     )}
-                    {autoThreshold !== null && (
+                    {algorithm === 'classic' && autoThreshold !== null && (
                         <div className="threshold-slider-wrapper">
                             <label className="threshold-label">
                                 Baseline Threshold
@@ -1689,8 +2010,7 @@ const ImageSubmission = () => {
                                         setAdjustedMask(null);
                                         setHasLocalEdits(false);
                                         setDeltaMap(null);
-                                        setMaskChangedSinceClassify(true);
-                                        setShowWorstPatches(false);
+                                        updateClassifyAlgo('classic', { maskChanged: true, showWorst: false, error: '' });
                                         apiFetch(`${API_BASE}/rethreshold/${encodeURIComponent(uploadedFilename)}?threshold=${autoThreshold}`)
                                             .catch(() => {});
                                     };
@@ -1699,15 +2019,61 @@ const ImageSubmission = () => {
                                     } else {
                                         doReset();
                                     }
-                                }}>Reset to baseline AI estimate</button>
+                                }}>Reset to baseline Classic algorithm estimate</button>
+                            )}
+                        </div>
+                    )}
+                    {algorithm === 'unet' && unetUserThreshold !== null && unetResult && (
+                        <div className="threshold-slider-wrapper">
+                            <label className="threshold-label">
+                                Probability Threshold
+                                <span className="threshold-value">{formatThreshold(unetUserThreshold)}</span>
+                                {isRethresholdingUnet && <span className="threshold-loading">⟳</span>}
+                            </label>
+                            <div className="threshold-control-row">
+                                <input
+                                    type="range"
+                                    className="threshold-slider"
+                                    min={0}
+                                    max={1}
+                                    step={0.01}
+                                    value={unetUserThreshold}
+                                    onChange={(e) => handleUnetThresholdChange(parseFloat(e.target.value))}
+                                />
+                                <input
+                                    type="number"
+                                    className="threshold-number-input"
+                                    min="0"
+                                    max="1"
+                                    step="0.01"
+                                    value={unetThresholdDraft}
+                                    aria-label="U-Net probability threshold value"
+                                    onChange={(e) => setUnetThresholdDraft(e.target.value)}
+                                    onBlur={(e) => {
+                                        const v = parseFloat(e.target.value);
+                                        if (Number.isFinite(v)) handleUnetThresholdChange(Math.max(0, Math.min(1, v)));
+                                        else setUnetThresholdDraft(formatThreshold(unetUserThreshold));
+                                    }}
+                                    onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                                />
+                            </div>
+                            <div className="threshold-hint">
+                                <span>More inclusive</span>
+                                <span>More restrictive</span>
+                            </div>
+                            {unetAdjustedRatio !== null && (
+                                <button className="threshold-reset-btn" onClick={handleResetUnetThreshold}>Reset to baseline U-Net estimate</button>
                             )}
                         </div>
                     )}
                 </div>
 
                 {/* FCM Membership Radar Chart — 4 categories + spectrum note */}
-                {analysisResult && !isAnalyzing && (
-                    <div className="report-card" style={{ border: '1px solid #4ecdc4' }}>
+                {(
+                    (algorithm === 'classic' && analysisResult && !isAnalyzing) ||
+                    (algorithm === 'unet' && unetResult && !isAnalyzingUnet)
+                ) && (
+                    <div className="report-card" style={{ border: `1px solid ${algorithm === 'unet' ? '#a855f7' : '#4ecdc4'}` }}>
                         <p className="report-label">Disease Classification</p>
 
                         {/* Always show hint to fine-tune before diagnosing */}
@@ -1728,6 +2094,10 @@ const ImageSubmission = () => {
                                 <span className="classify-spinner" />
                                 <span>Classifying refined mask{classifyProgress ? ` (${classifyProgress.current}/${classifyProgress.total})` : ''}...</span>
                             </div>
+                        )}
+
+                        {classificationError && !isClassifying && (
+                            <p className="error-text" style={{ marginTop: '0.4rem' }}>{classificationError}</p>
                         )}
 
                         {classificationResult && classificationResult.status === 'success' && (
@@ -1762,7 +2132,7 @@ const ImageSubmission = () => {
                                     {worstPatchCoords && worstPatchCoords.length > 0 && (
                                         <button
                                             className="analyze-patches-btn"
-                                            onClick={() => setShowWorstPatches(prev => !prev)}
+                                            onClick={() => updateClassifyAlgo(algorithm, cur => ({ showWorst: !cur.showWorst }))}
                                         >
                                             {showWorstPatches ? 'Hide Patch Results' : 'Analyze Patch Results'}
                                         </button>

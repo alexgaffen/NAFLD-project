@@ -710,6 +710,136 @@ def classify_area(cache_key, x1, y1, x2, y2):
         del tile_pil
 
 
+def classify_mask_array(mask_np, tissue_mask, patch_size=512, top_n=5,
+                        progress_callback=None):
+    """
+    Generic version of classify_from_mask that operates on raw arrays
+    (no _deconv_cache lookup).  Used by the U-Net pipeline which has its
+    own per-filename cache.
+
+    mask_np      : 2D uint8/bool array — binary fibrosis mask
+    tissue_mask  : 2D bool array — tissue inclusion mask (for tile gating)
+    """
+    if mask_np is None:
+        return None
+    if mask_np.ndim == 3:
+        mask_np = mask_np[..., 0]
+    h, w = mask_np.shape[:2]
+
+    # Match large-image heuristic from analyze_single_file_patched
+    is_large = max(h, w) > 2048
+    TISSUE_FRAC_THRESHOLD = 0.25
+
+    if not is_large:
+        mask_uint = mask_np.astype(np.uint8) * (255 if mask_np.dtype == bool else 1)
+        if mask_uint.ndim == 2:
+            mask_uint = np.stack([mask_uint] * 3, axis=-1)
+        mask_pil = Image.fromarray(mask_uint).convert('RGB')
+        features = extract_features(mask_pil)
+        reduc_features = pca_model.transform([features])
+        u, _, _, _, _, _ = cmeans_predict(reduc_features.T, centroids, m=best_m, error=0.1, maxiter=100)
+        if cluster_map is not None:
+            n_groups = max(cluster_map.values()) + 1
+            u_merged = np.zeros((n_groups, u.shape[1]))
+            for src, dst in cluster_map.items():
+                u_merged[dst] += u[src]
+            u = u_merged
+        label_idx = int(np.argmax(u, axis=0))
+        label_text = cluster_lookup_table.get(label_idx, f"Unknown Cluster {label_idx}")
+        scores = {membership_column_names[i]: float(u[i][0]) for i in range(4)}
+        return {
+            "status": "success",
+            "cluster_label": label_text,
+            "membership_scores": scores,
+            "patch_count": 1,
+            **scores,
+        }
+
+    rows_range = list(range(0, h, patch_size))
+    cols_range = list(range(0, w, patch_size))
+    num_rows = len(rows_range)
+    num_cols = len(cols_range)
+    total_tiles = num_rows * num_cols
+    current_tile = 0
+
+    patch_memberships = []
+    patch_coords = []
+
+    for ri, py in enumerate(rows_range):
+        for ci, px in enumerate(cols_range):
+            current_tile += 1
+            tile = mask_np[py:py + patch_size, px:px + patch_size]
+            th, tw = tile.shape[:2]
+            if th < 32 or tw < 32:
+                continue
+            tile_frac = float(np.mean(tissue_mask[py:py + th, px:px + tw])) if tissue_mask is not None else 1.0
+            if tile_frac < TISSUE_FRAC_THRESHOLD:
+                if progress_callback:
+                    progress_callback(current_tile, total_tiles, len(patch_memberships),
+                                      grid_rows=num_rows, grid_cols=num_cols,
+                                      tile_row=ri, tile_col=ci, is_tissue=False)
+                continue
+            tile_arr = tile.astype(np.uint8)
+            if tile_arr.dtype == bool or tile_arr.max() <= 1:
+                tile_arr = tile_arr * 255
+            if tile_arr.ndim == 2:
+                tile_arr = np.stack([tile_arr] * 3, axis=-1)
+            tile_pil = Image.fromarray(tile_arr).convert('RGB')
+            try:
+                features = extract_features(tile_pil)
+                reduc_features = pca_model.transform([features])
+                u, _, _, _, _, _ = cmeans_predict(reduc_features.T, centroids, m=best_m, error=0.1, maxiter=100)
+                if cluster_map is not None:
+                    n_groups = max(cluster_map.values()) + 1
+                    u_merged = np.zeros((n_groups, u.shape[1]))
+                    for src, dst in cluster_map.items():
+                        u_merged[dst] += u[src]
+                    u = u_merged
+                patch_memberships.append([float(u[i][0]) for i in range(4)])
+                patch_coords.append({'row': ri, 'col': ci, 'py': py, 'px': px})
+            except Exception as e:
+                print(f"[classify_mask_array] Patch ({py},{px}) failed: {e}")
+            finally:
+                del tile_pil
+
+            if len(patch_memberships) % 10 == 0:
+                gc.collect()
+
+            if progress_callback:
+                progress_callback(current_tile, total_tiles, len(patch_memberships),
+                                  grid_rows=num_rows, grid_cols=num_cols,
+                                  tile_row=ri, tile_col=ci, is_tissue=True)
+
+    if not patch_memberships:
+        return {"status": "error", "message": "No classifiable tiles found in mask"}
+
+    severity = [m[1] + m[2] for m in patch_memberships]
+    ranked_indices = sorted(range(len(severity)), key=lambda i: severity[i], reverse=True)
+    top_indices = ranked_indices[:min(top_n, len(ranked_indices))]
+    top_memberships = [patch_memberships[i] for i in top_indices]
+    avg_memberships = np.mean(top_memberships, axis=0)
+
+    label_idx = int(np.argmax(avg_memberships))
+    label_text = cluster_lookup_table.get(label_idx, f"Unknown Cluster {label_idx}")
+    scores = {membership_column_names[i]: float(avg_memberships[i]) for i in range(4)}
+    worst_patches = [patch_coords[i] for i in top_indices]
+
+    return {
+        "status": "success",
+        "cluster_label": label_text,
+        "membership_scores": scores,
+        "patch_count": len(patch_memberships),
+        "top_n_used": min(top_n, len(patch_memberships)),
+        "worst_patches": worst_patches,
+        "grid_rows": num_rows,
+        "grid_cols": num_cols,
+        "img_h": h,
+        "img_w": w,
+        "patch_size": patch_size,
+        **scores,
+    }
+
+
 def classify_from_mask(cache_key, patch_size=512, top_n=5, progress_callback=None):
     """
     Run VGG16 + PCA + FCM classification on the current refined B&W mask.

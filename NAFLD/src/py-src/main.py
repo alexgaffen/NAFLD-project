@@ -12,7 +12,7 @@ import zipfile
 import io
 import csv
 from werkzeug.utils import secure_filename
-from nafld import analyze_single_file, preview_single_file, analyze_single_file_patched, rethreshold, rethreshold_area, reset_area, undo_area, get_delta_map, get_excluded_mask, pil_to_b64, classify_from_mask, analyze_area, classify_area
+from nafld import analyze_single_file, preview_single_file, analyze_single_file_patched, rethreshold, rethreshold_area, reset_area, undo_area, get_delta_map, get_excluded_mask, pil_to_b64, classify_from_mask, classify_mask_array, analyze_area, classify_area
 
 # sys.path.append("C:\\Projects\\Machine Learning\\NAFLD\\NAFLD-project\\NAFLD\\src\\py-src\\nafld.py")
 from nafld import process_all_images
@@ -21,6 +21,19 @@ import queue
 import threading
 
 from auth import auth_bp, init_db, login_required
+
+# U-Net (Round 1) inference — loaded once at startup, see UNET_MODEL below
+from inference import load_model as _unet_load_model, run_inference as _unet_run_inference
+import base64
+import numpy as np
+from PIL import Image as _PILImage
+try:
+    import matplotlib
+    matplotlib.use('Agg')
+    from matplotlib import cm as _mpl_cm
+    _HAS_MPL = True
+except Exception:
+    _HAS_MPL = False
 
 # Serve the React build in production when NAFLD_STATIC_DIR is set
 _static_dir = os.environ.get('NAFLD_STATIC_DIR')
@@ -33,6 +46,30 @@ CORS(app, expose_headers=['Content-Disposition'],
 
 # Initialise user database on startup
 init_db()
+
+# ── U-Net (Round 1) model: load once at startup ────────────────────────
+def _resolve_unet_checkpoint_path():
+    configured = os.environ.get('UNET_CHECKPOINT_PATH')
+    if configured:
+        return configured
+    base_dir = os.path.dirname(__file__)
+    candidates = [
+        os.path.join(base_dir, 'tiny_unet_round1_best_v1__1_.pth'),
+        os.path.join(base_dir, 'tiny_unet_round1_best_v1.pth'),
+    ]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return candidates[0]
+
+
+UNET_CHECKPOINT_PATH = _resolve_unet_checkpoint_path()
+try:
+    UNET_MODEL = _unet_load_model(UNET_CHECKPOINT_PATH)
+    print(f"[unet] Loaded checkpoint: {UNET_CHECKPOINT_PATH}")
+except Exception as _e:
+    print(f"[unet] WARNING: failed to load checkpoint '{UNET_CHECKPOINT_PATH}': {_e}")
+    UNET_MODEL = None
 
 # Register auth blueprint (provides /login, /refresh, /me)
 app.register_blueprint(auth_bp)
@@ -96,6 +133,275 @@ def analyze_file(filename):
     _save_result_meta(filename, result)
 
     return jsonify(result), 200
+
+
+def _prob_map_to_inferno_b64(prob_map: np.ndarray) -> str:
+    """Render a [H, W] probability map as a base64-encoded inferno PNG."""
+    arr = np.clip(prob_map.astype(np.float32), 0.0, 1.0)
+    if _HAS_MPL:
+        rgba = (_mpl_cm.get_cmap('inferno')(arr) * 255).astype(np.uint8)
+        img = _PILImage.fromarray(rgba, mode='RGBA')
+    else:
+        # Fallback: simple red ramp if matplotlib is unavailable
+        gray = (arr * 255).astype(np.uint8)
+        rgb = np.stack([gray, np.zeros_like(gray), np.zeros_like(gray)], axis=-1)
+        img = _PILImage.fromarray(rgb, mode='RGB')
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    return base64.b64encode(buf.getvalue()).decode('ascii')
+
+
+def _read_rgb_for_unet(file_path: str, target_max_dim: int = 4096) -> np.ndarray:
+    """Read an uploaded file as an RGB numpy array. SVS slides are read at the
+    pyramid level whose largest dimension is closest to (but not below) target_max_dim,
+    falling back to the lowest level if no level is large enough."""
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == '.svs':
+        try:
+            import openslide
+            slide = openslide.OpenSlide(file_path)
+            try:
+                # Pick the highest-resolution level whose largest dimension is <= target_max_dim.
+                # If even level_count-1 (smallest) is larger than target_max_dim, use level_count-1.
+                chosen_level = slide.level_count - 1
+                for lvl in range(slide.level_count):
+                    w, h = slide.level_dimensions[lvl]
+                    if max(w, h) <= target_max_dim:
+                        chosen_level = lvl
+                        break
+                w, h = slide.level_dimensions[chosen_level]
+                region = slide.read_region((0, 0), chosen_level, (w, h)).convert('RGB')
+                return np.array(region)
+            finally:
+                slide.close()
+        except Exception as e:
+            raise RuntimeError(f"Failed to read SVS file: {e}")
+    return np.array(_PILImage.open(file_path).convert('RGB'))
+
+
+# Per-filename cache for U-Net inference results so we can re-threshold and
+# re-classify without re-running the model. Keyed by the basename used in URLs.
+_unet_cache = {}
+UNET_BASELINE_THRESHOLD = 0.5
+
+
+def _format_unet_result_payload(result, threshold: float = UNET_BASELINE_THRESHOLD):
+    """Build the JSON payload returned to the frontend.
+    The heatmap is the inferno-colored prob_map (independent of threshold).
+    fibrosis_ratio is computed at the supplied threshold.
+    """
+    prob_map = result['prob_map']
+    tissue_mask = result.get('tissue_mask')
+    if tissue_mask is not None:
+        fibrosis_mask = (prob_map >= threshold) & tissue_mask
+        tissue_count = int(tissue_mask.sum())
+    else:
+        fibrosis_mask = (prob_map >= threshold)
+        tissue_count = int(prob_map.size)
+    if tissue_count > 0:
+        fibrosis_fraction = float(fibrosis_mask.sum()) / float(tissue_count)
+    else:
+        fibrosis_fraction = 0.0
+    fibrosis_pct = round(fibrosis_fraction * 100.0, 2)
+    heatmap_b64 = _prob_map_to_inferno_b64(prob_map)
+    return {
+        'status': 'success',
+        'algorithm': 'unet_round1',
+        'fibrosis_ratio': fibrosis_pct,
+        'fibrosis_percentage': fibrosis_pct,
+        'threshold': float(threshold),
+        'baseline_threshold': UNET_BASELINE_THRESHOLD,
+        'heatmap_image': f"data:image/png;base64,{heatmap_b64}",
+    }
+
+
+@app.route("/analyze-unet/<filename>", methods=['GET'])
+@login_required
+def analyze_file_unet(filename):
+    """Run the Tiny U-Net (Round 1) fibrosis segmentation on an uploaded file."""
+    if UNET_MODEL is None:
+        return jsonify({
+            'status': 'error',
+            'error': 'U-Net model checkpoint was not found on the server.',
+        }), 503
+
+    file_path = resolve_uploaded_file_path(filename)
+    if not file_path:
+        return jsonify({'error': 'File not found'}), 404
+
+    try:
+        img_rgb = _read_rgb_for_unet(file_path)
+        result = _unet_run_inference(UNET_MODEL, img_rgb)
+    except Exception as e:
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    _unet_cache[filename] = {
+        'prob_map': result['prob_map'],
+        'tissue_mask': result['tissue_mask'],
+        'threshold': UNET_BASELINE_THRESHOLD,
+    }
+    return jsonify(_format_unet_result_payload(result, UNET_BASELINE_THRESHOLD)), 200
+
+
+@app.route("/analyze-unet-stream/<filename>", methods=['GET'])
+@login_required
+def analyze_file_unet_stream(filename):
+    """SSE endpoint for Tiny U-Net patch progress and final heatmap result."""
+    def single_event(msg):
+        return Response(
+            (f"data: {json.dumps(msg)}\n\n" for _ in [0]),
+            mimetype='text/event-stream',
+            headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
+        )
+
+    if UNET_MODEL is None:
+        return single_event({
+            'type': 'error',
+            'error': 'U-Net model checkpoint was not found on the server.',
+        })
+
+    file_path = resolve_uploaded_file_path(filename)
+    if not file_path:
+        return single_event({'type': 'error', 'error': 'File not found'})
+
+    progress_queue = queue.Queue()
+    result_holder = [None]
+    error_holder = [None]
+
+    def on_progress(current, total, **kwargs):
+        msg = {
+            'type': 'progress',
+            'current': current,
+            'total': total,
+            'tissue_patches': current,
+        }
+        msg.update(kwargs)
+        progress_queue.put(msg)
+
+    def worker():
+        try:
+            img_rgb = _read_rgb_for_unet(file_path)
+            result = _unet_run_inference(
+                UNET_MODEL,
+                img_rgb,
+                progress_callback=on_progress
+            )
+            _unet_cache[filename] = {
+                'prob_map': result['prob_map'],
+                'tissue_mask': result['tissue_mask'],
+                'threshold': UNET_BASELINE_THRESHOLD,
+            }
+            result_holder[0] = _format_unet_result_payload(result, UNET_BASELINE_THRESHOLD)
+        except Exception as e:
+            error_holder[0] = str(e)
+        finally:
+            progress_queue.put({'type': 'done'})
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+
+    def generate():
+        while True:
+            try:
+                msg = progress_queue.get(timeout=300)
+            except queue.Empty:
+                yield f"data: {json.dumps({'type': 'error', 'error': 'U-Net analysis timed out'})}\n\n"
+                break
+            if msg['type'] == 'done':
+                if error_holder[0]:
+                    yield f"data: {json.dumps({'type': 'error', 'error': error_holder[0]})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'type': 'result', 'data': result_holder[0]})}\n\n"
+                break
+            yield f"data: {json.dumps(msg)}\n\n"
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route("/rethreshold-unet/<filename>", methods=['GET'])
+@login_required
+def rethreshold_unet(filename):
+    """Re-evaluate the cached U-Net probability map at a new threshold.
+    Returns updated fibrosis_ratio. Heatmap stays the same (it visualises
+    raw probabilities, not the threshold)."""
+    thresh_str = request.args.get('threshold')
+    if thresh_str is None:
+        return jsonify({'error': 'Missing threshold parameter'}), 400
+    try:
+        new_thresh = float(thresh_str)
+    except ValueError:
+        return jsonify({'error': 'Invalid threshold value'}), 400
+
+    entry = _unet_cache.get(filename)
+    if entry is None:
+        return jsonify({'error': 'No cached U-Net data. Run U-Net analysis first.'}), 404
+
+    entry['threshold'] = new_thresh
+    payload = _format_unet_result_payload(
+        {'prob_map': entry['prob_map'], 'tissue_mask': entry['tissue_mask']},
+        threshold=new_thresh,
+    )
+    return jsonify(payload), 200
+
+
+@app.route("/classify-mask-unet/<filename>", methods=['GET'])
+@login_required
+def classify_mask_unet(filename):
+    """SSE endpoint — runs VGG16+PCA+FCM classification on the U-Net binary mask
+    at the currently cached threshold."""
+    entry = _unet_cache.get(filename)
+    if entry is None:
+        def err():
+            yield f"data: {json.dumps({'type': 'error', 'error': 'No cached U-Net data. Run U-Net analysis first.'})}\n\n"
+        return Response(err(), mimetype='text/event-stream',
+                        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+    prob_map = entry['prob_map']
+    tissue_mask = entry['tissue_mask']
+    threshold = entry.get('threshold', UNET_BASELINE_THRESHOLD)
+    binary_mask = ((prob_map >= threshold) & tissue_mask).astype(np.uint8) * 255
+
+    progress_queue = queue.Queue()
+    result_holder = [None]
+
+    def on_progress(current, total, tissue_count, **kwargs):
+        msg = {
+            'type': 'progress',
+            'current': current,
+            'total': total,
+            'tissue_patches': tissue_count,
+        }
+        msg.update(kwargs)
+        progress_queue.put(msg)
+
+    def worker():
+        try:
+            result_holder[0] = classify_mask_array(
+                binary_mask, tissue_mask, progress_callback=on_progress
+            )
+        except Exception as e:
+            result_holder[0] = {'status': 'error', 'message': str(e)}
+        finally:
+            progress_queue.put({'type': 'done'})
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+
+    def generate():
+        while True:
+            try:
+                msg = progress_queue.get(timeout=300)
+            except queue.Empty:
+                break
+            if msg['type'] == 'done':
+                yield f"data: {json.dumps({'type': 'result', 'data': result_holder[0]})}\n\n"
+                break
+            else:
+                yield f"data: {json.dumps(msg)}\n\n"
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
 def _is_patchable(file_path):
